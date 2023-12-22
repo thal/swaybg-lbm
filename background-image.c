@@ -53,9 +53,29 @@ cairo_surface_t *load_background_image(const char *path) {
 }
 
 void render_background_image(cairo_t *cairo, cairo_surface_t *image,
-		enum background_mode mode, int buffer_width, int buffer_height) {
+		enum background_mode mode, int buffer_width, int buffer_height, struct animation_context* anim) {
 	double width = cairo_image_surface_get_width(image);
 	double height = cairo_image_surface_get_height(image);
+
+	// Do some silly animation every few frames, swap the color channels
+	if(anim->frame_count++ % 256 == 0){
+		int cstride = cairo_image_surface_get_stride(image);
+		unsigned char *pixels = cairo_image_surface_get_data(image);
+		for(int row = 0; row < height; row++){
+			unsigned char *rowbegin = pixels;
+			for(int col = 0; col<width; col++){
+				unsigned char* r = &rowbegin[col*4 + 1];
+				unsigned char* g = &rowbegin[col*4 + 2];
+				unsigned char* b = &rowbegin[col*4 + 3];
+
+				char tmp = *r;
+				*r = *b;
+				*b = *g;
+				*g = tmp;
+			}
+			pixels += cstride;
+		}
+	}
 
 	cairo_save(cairo);
 	switch (mode) {

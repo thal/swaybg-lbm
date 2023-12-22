@@ -58,6 +58,8 @@ struct swaybg_image {
 	struct wl_list link;
 	const char *path;
 	bool load_required;
+	cairo_surface_t *surface;
+	struct animation_context anim;
 };
 
 struct swaybg_output_config {
@@ -66,6 +68,7 @@ struct swaybg_output_config {
 	struct swaybg_image *image;
 	enum background_mode mode;
 	uint32_t color;
+	bool animated;
 	struct wl_list link;
 };
 
@@ -87,9 +90,31 @@ struct swaybg_output {
 	uint32_t configure_serial;
 	bool dirty, needs_ack;
 	int32_t committed_width, committed_height, committed_scale;
+	uint32_t last_frame_time;
 
+	struct pool_buffer buffer;
 	struct wl_list link;
 };
+
+bool is_valid_color(const char *color) {
+	int len = strlen(color);
+	if (len != 7 || color[0] != '#') {
+		swaybg_log(LOG_ERROR, "%s is not a valid color for swaybg. "
+				"Color should be specified as #rrggbb (no alpha).", color);
+		return false;
+	}
+
+	int i;
+	for (i = 1; i < len; ++i) {
+		if (!isxdigit(color[i])) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static const struct wl_callback_listener wl_surface_frame_listener;
 
 static void render_frame(struct swaybg_output *output, cairo_surface_t *surface) {
 	int buffer_width = output->width * output->scale,
@@ -97,7 +122,8 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 	// If the last committed buffer has the same size as this one would, do
 	// not render a new buffer, because it will be identical to the old one
-	if (output->committed_width == buffer_width &&
+	if (!output->config->animated &&
+			output->committed_width == buffer_width &&
 			output->committed_height == buffer_height) {
 		if (output->committed_scale != output->scale) {
 			wl_surface_set_buffer_scale(output->surface, output->scale);
@@ -136,13 +162,15 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		return;
 	}
 
-	struct pool_buffer buffer;
-	if (!create_buffer(&buffer, output->state->shm,
-			buffer_width, buffer_height, WL_SHM_FORMAT_ARGB8888)) {
-		return;
+	struct pool_buffer* buffer = &output->buffer;
+	if (!buffer->buffer) {
+		if (!create_buffer(buffer, output->state->shm,
+				buffer_width, buffer_height, WL_SHM_FORMAT_ARGB8888)) {
+			return;
+		}
 	}
 
-	cairo_t *cairo = buffer.cairo;
+	cairo_t *cairo = buffer->cairo;
 	cairo_save(cairo);
 	cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
 	cairo_paint(cairo);
@@ -158,22 +186,45 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 		if (surface) {
 			render_background_image(cairo, surface,
-				output->config->mode, buffer_width, buffer_height);
+				output->config->mode, buffer_width, buffer_height, &output->config->image->anim);
 		}
 	}
 
+
+	// request the next frame TODO: only do this if image is animated
+	struct wl_callback *cb = wl_surface_frame(output->surface);
+	wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
+
 	wl_surface_set_buffer_scale(output->surface, output->scale);
-	wl_surface_attach(output->surface, buffer.buffer, 0, 0);
+	wl_surface_attach(output->surface, buffer->buffer, 0, 0);
 	wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
 	wl_surface_commit(output->surface);
 
 	output->committed_width = buffer_width;
 	output->committed_height = buffer_height;
 	output->committed_scale = output->scale;
-
-	// we will not reuse the buffer, so destroy it immediately
-	destroy_buffer(&buffer);
 }
+
+static void wl_surface_frame_done(void *data, struct wl_callback *cb, uint32_t time) {
+	wl_callback_destroy(cb);
+
+	struct swaybg_output *output = data;
+	// Sway is sending two frame callbacks for each frame. Not sure if its our fault or not.
+	// For now, check time to improve performance somewhat
+	if(output->last_frame_time < time){
+		if( output->state->outputs.next == &output->link )
+		{
+			printf("frame callback: %d %d\n", output->wl_name, time);
+		}
+		// TODO: chasing too many pointers. this sucks
+		render_frame(output, output->config->image->surface);
+	}
+	output->last_frame_time = time;
+}
+
+static const struct wl_callback_listener wl_surface_frame_listener = {
+	.done = wl_surface_frame_done
+};
 
 static void destroy_swaybg_image(struct swaybg_image *image) {
 	if (!image) {
@@ -203,6 +254,7 @@ static void destroy_swaybg_output(struct swaybg_output *output) {
 	if (output->surface != NULL) {
 		wl_surface_destroy(output->surface);
 	}
+	destroy_buffer(&output->buffer);
 	wl_output_destroy(output->wl_output);
 	free(output->name);
 	free(output->identifier);
@@ -447,6 +499,7 @@ static void parse_command_line(int argc, char **argv,
 	struct swaybg_output_config *config = calloc(1, sizeof(struct swaybg_output_config));
 	config->output = strdup("*");
 	config->mode = BACKGROUND_MODE_INVALID;
+	config->animated = true;
 	wl_list_init(&config->link); // init for safe removal
 
 	int c;
@@ -605,21 +658,25 @@ int main(int argc, char **argv) {
 				continue;
 			}
 
-			cairo_surface_t *surface = load_background_image(image->path);
-			if (!surface) {
+			if (image->surface) {
+				cairo_surface_destroy(image->surface);
+			}
+
+			image->surface = load_background_image(image->path);
+			if (!image->surface) {
 				swaybg_log(LOG_ERROR, "Failed to load image: %s", image->path);
 				continue;
 			}
 
 			wl_list_for_each(output, &state.outputs, link) {
 				if (output->dirty && output->config->image == image) {
+
 					output->dirty = false;
-					render_frame(output, surface);
+					render_frame(output, image->surface);
 				}
 			}
-
 			image->load_required = false;
-			cairo_surface_destroy(surface);
+			//cairo_surface_destroy(surface);
 		}
 
 		// Redraw outputs without associated image
