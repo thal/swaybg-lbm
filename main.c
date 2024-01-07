@@ -15,6 +15,8 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "single-pixel-buffer-v1-client-protocol.h"
+#include "imagelbm.h"
+
 
 /*
  * If `color` is a hexadecimal string of the form 'rrggbb' or '#rrggbb',
@@ -54,13 +56,6 @@ struct swaybg_state {
 	bool run_display;
 };
 
-struct swaybg_image {
-	struct wl_list link;
-	const char *path;
-	bool load_required;
-	cairo_surface_t *surface;
-	struct animation_context anim;
-};
 
 struct swaybg_output_config {
 	char *output;
@@ -68,7 +63,6 @@ struct swaybg_output_config {
 	struct swaybg_image *image;
 	enum background_mode mode;
 	uint32_t color;
-	bool animated;
 	struct wl_list link;
 };
 
@@ -91,6 +85,7 @@ struct swaybg_output {
 	bool dirty, needs_ack;
 	int32_t committed_width, committed_height, committed_scale;
 	uint32_t last_frame_time;
+	uint32_t frame_count;
 
 	struct pool_buffer buffer;
 	struct wl_list link;
@@ -122,7 +117,7 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 	// If the last committed buffer has the same size as this one would, do
 	// not render a new buffer, because it will be identical to the old one
-	if (!output->config->animated &&
+	if (!output->config->image->anim &&
 			output->committed_width == buffer_width &&
 			output->committed_height == buffer_height) {
 		if (output->committed_scale != output->scale) {
@@ -186,14 +181,16 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 		if (surface) {
 			render_background_image(cairo, surface,
-				output->config->mode, buffer_width, buffer_height, &output->config->image->anim);
+				output->config->mode, buffer_width, buffer_height);
 		}
 	}
 
 
-	// request the next frame TODO: only do this if image is animated
-	struct wl_callback *cb = wl_surface_frame(output->surface);
-	wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
+	if(output->config->image->anim) {
+		struct wl_callback *cb = wl_surface_frame(output->surface);
+		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
+		printf("Added listener for %d\n", output->wl_name);
+	}
 
 	wl_surface_set_buffer_scale(output->surface, output->scale);
 	wl_surface_attach(output->surface, buffer->buffer, 0, 0);
@@ -205,20 +202,92 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 	output->committed_scale = output->scale;
 }
 
+static void render_animated_frame(struct swaybg_output* output, struct animated_image* anim)
+{
+	struct wl_callback *cb = wl_surface_frame(output->surface);
+	wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
+
+	bool do_render = false;
+	if( &output->link == output->state->outputs.next ) {
+		// Let the first display drive the animation
+		// TODO: this only works if the same image is on all outputs
+		// Animation should be driven by one display, and such display should be configured with the image
+		do_render = cycle_palette(anim);
+	}
+
+	//printf("%s %d %d x %d, %d\n",__FUNCTION__, output->wl_name, output->width, output->height, output->scale);
+
+	if(do_render) {
+		// TODO: Seems a bit inefficient to destroy these every time. But youre not allowed to reuse a buffer
+		// until the compositor send a wl_buffer::release.
+		// Don't think anything's actually being reallocated here, so maybe it's ok
+		destroy_buffer(&output->buffer);
+		unsigned int surface_width = output->width * output->scale;
+		unsigned int surface_height = output->height * output->scale;
+		create_buffer(&output->buffer, output->state->shm, surface_width, surface_height, WL_SHM_FORMAT_ARGB8888);
+
+		const int im_width = anim->lbm_image.width;
+		const int im_height = anim->lbm_image.height;
+
+		// TODO: all that is needed to position and scale is a origin and a scale factor. Do all sampling relative to origin
+		// Only integer scaling supported
+		// Get "center" "fit" or "fill" from output config. Stretching not supported
+		//
+		// This is horribly inefficient
+		// TODO: Reuse old buffers. Would save the lookup from pixel no.->palette color
+		// TODO: track damage in cycle_palette. Only update the pixels that change.
+		// TODO: copy from image source to surface. Instead of other way around. only 640x480 pixels to copy
+		//
+		const int image_scale = 2;
+		static const int PIXEL_SIZE = 4;
+		unsigned char* surface_row = output->buffer.data;
+		const struct image *source_image = &anim->lbm_image;
+		const unsigned char *source_pixels = source_image->pixels;
+		for(unsigned int row = 0; row < surface_height; row ++){
+			int source_row = row % (im_height*image_scale);
+			for( unsigned int col = 0; col < surface_width; col++ )
+			{
+				int sourcecol = col % (im_width * image_scale);
+				unsigned char* a = &surface_row[col*PIXEL_SIZE + 3];
+				unsigned char* r = &surface_row[col*PIXEL_SIZE + 2];
+				unsigned char* g = &surface_row[col*PIXEL_SIZE + 1];
+				unsigned char* b = &surface_row[col*PIXEL_SIZE + 0];
+				*a = 255; // a = 0 gives apparently halfish brightness... How is the alpha byte interpreted?
+				unsigned char pixel = source_pixels[(source_row/ image_scale)*source_image->width + (sourcecol/image_scale)];
+				*r = source_image->palette[pixel].r;
+				*b = source_image->palette[pixel].b;
+				*g = source_image->palette[pixel].g;
+
+				// Test pattern
+#if 0
+				if( row % 16 != 0 && col % 16 != 0)
+				{
+					*r = 255;
+					*g = 255;
+					*b = 255;
+				}
+				else
+				{
+					*r = 0;
+					*g = 0;
+					*b = 0;
+				}
+#endif
+			}
+			surface_row += output->width * PIXEL_SIZE * output->scale;
+		}
+	wl_surface_set_buffer_scale(output->surface, output->scale);
+	wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
+	wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
+	}
+	wl_surface_commit(output->surface);
+}
+
 static void wl_surface_frame_done(void *data, struct wl_callback *cb, uint32_t time) {
 	wl_callback_destroy(cb);
 
 	struct swaybg_output *output = data;
-	// Sway is sending two frame callbacks for each frame. Not sure if its our fault or not.
-	// For now, check time to improve performance somewhat
-	if(output->last_frame_time < time){
-		if( output->state->outputs.next == &output->link )
-		{
-			printf("frame callback: %d %d\n", output->wl_name, time);
-		}
-		// TODO: chasing too many pointers. this sucks
-		render_frame(output, output->config->image->surface);
-	}
+	render_animated_frame(output, output->config->image->anim);
 	output->last_frame_time = time;
 }
 
@@ -231,6 +300,9 @@ static void destroy_swaybg_image(struct swaybg_image *image) {
 		return;
 	}
 	wl_list_remove(&image->link);
+	if (image->anim) {
+		free(image->anim);
+	}
 	free(image);
 }
 
@@ -270,6 +342,7 @@ static void layer_surface_configure(void *data,
 	output->dirty = true;
 	output->configure_serial = serial;
 	output->needs_ack = true;
+	printf("Dirtying output because of configure. Output surface needs ack\n");
 }
 
 static void layer_surface_closed(void *data,
@@ -499,7 +572,6 @@ static void parse_command_line(int argc, char **argv,
 	struct swaybg_output_config *config = calloc(1, sizeof(struct swaybg_output_config));
 	config->output = strdup("*");
 	config->mode = BACKGROUND_MODE_INVALID;
-	config->animated = true;
 	wl_list_init(&config->link); // init for safe removal
 
 	int c;
@@ -632,6 +704,8 @@ int main(int argc, char **argv) {
 
 	state.run_display = true;
 	while (wl_display_dispatch(state.display) != -1 && state.run_display) {
+		static int times = 1000;
+		if(times-- == 0) state.run_display = false;
 		// Send acks, and determine which images need to be loaded
 		struct swaybg_output *output;
 		wl_list_for_each(output, &state.outputs, link) {
@@ -640,6 +714,7 @@ int main(int argc, char **argv) {
 				zwlr_layer_surface_v1_ack_configure(
 						output->layer_surface,
 						output->configure_serial);
+				printf("Acking\n");
 			}
 
 			int buffer_width = output->width * output->scale,
@@ -658,25 +733,29 @@ int main(int argc, char **argv) {
 				continue;
 			}
 
-			if (image->surface) {
-				cairo_surface_destroy(image->surface);
-			}
+			cairo_surface_t *surface = load_background_image(image->path);
 
-			image->surface = load_background_image(image->path);
-			if (!image->surface) {
+			if (!surface) {
+				image->anim = load_animated_background_image(image->path);
+			}
+			if (!surface && !image->anim) {
 				swaybg_log(LOG_ERROR, "Failed to load image: %s", image->path);
 				continue;
+			}
+			else
+			{
+				swaybg_log(LOG_INFO, "Loaded LBM image: %s", image->path);
 			}
 
 			wl_list_for_each(output, &state.outputs, link) {
 				if (output->dirty && output->config->image == image) {
 
 					output->dirty = false;
-					render_frame(output, image->surface);
+					render_frame(output, surface);
 				}
 			}
 			image->load_required = false;
-			//cairo_surface_destroy(surface);
+			cairo_surface_destroy(surface);
 		}
 
 		// Redraw outputs without associated image
