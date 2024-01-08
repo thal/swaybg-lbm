@@ -109,6 +109,23 @@ bool is_valid_color(const char *color) {
 	return true;
 }
 
+void release_buffer(void *data, struct wl_buffer *buffer) {
+	struct swaybg_output *output = data;
+	printf("%s %p \n",__FUNCTION__, buffer);
+	if( output->buffer.buffer == buffer ) { // If frame callback is not reallocating buffer, this is always the case
+		// Let the output reuse this buffer if it can
+		output->buffer.available = true;
+		printf("%s Reusing %p\n",__FUNCTION__, buffer);
+	} else {
+		printf("%s Destroying %p\n",__FUNCTION__, buffer);
+		destroy_buffer(&output->buffer);
+	}
+}
+
+const struct wl_buffer_listener buffer_listener = {
+	.release = release_buffer
+};
+
 static const struct wl_callback_listener wl_surface_frame_listener;
 
 static void render_frame(struct swaybg_output *output, cairo_surface_t *surface) {
@@ -157,15 +174,15 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		return;
 	}
 
-	struct pool_buffer* buffer = &output->buffer;
-	if (!buffer->buffer) {
-		if (!create_buffer(buffer, output->state->shm,
-				buffer_width, buffer_height, WL_SHM_FORMAT_ARGB8888)) {
+	if(!output->buffer.buffer) {
+		//output->buffer = calloc(1, sizeof(struct pool_buffer));
+		if (!create_buffer(&output->buffer, output->state->shm,
+				buffer_width, buffer_height, WL_SHM_FORMAT_ARGB8888, output)) {
 			return;
 		}
 	}
 
-	cairo_t *cairo = buffer->cairo;
+	cairo_t *cairo = output->buffer.cairo;
 	cairo_save(cairo);
 	cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
 	cairo_paint(cairo);
@@ -193,7 +210,7 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 	}
 
 	wl_surface_set_buffer_scale(output->surface, output->scale);
-	wl_surface_attach(output->surface, buffer->buffer, 0, 0);
+	wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
 	wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
 	wl_surface_commit(output->surface);
 
@@ -218,13 +235,19 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 	//printf("%s %d %d x %d, %d\n",__FUNCTION__, output->wl_name, output->width, output->height, output->scale);
 
 	if(do_render) {
-		// TODO: Seems a bit inefficient to destroy these every time. But youre not allowed to reuse a buffer
-		// until the compositor send a wl_buffer::release.
-		// Don't think anything's actually being reallocated here, so maybe it's ok
-		destroy_buffer(&output->buffer);
 		unsigned int surface_width = output->width * output->scale;
 		unsigned int surface_height = output->height * output->scale;
-		create_buffer(&output->buffer, output->state->shm, surface_width, surface_height, WL_SHM_FORMAT_ARGB8888);
+
+		bool buffer_size_changed = false; // TODO: check if size has changed
+		if( buffer_size_changed || !output->buffer.available ) {
+			printf("%s can't reuse buffer\n", __FUNCTION__);
+			// Can't use the current buffer. Either it's the wrong size or the compositor hasn't released it
+			// If the buffer isn't free yet, just hope it will be released eventually. Seems to be the case.
+			// If the compositor ever fails to release a buffer, the animation will stop. Should handle this somehow.
+			// Could also allocate a new buffer, but doing that a lot might cause us to fall further behind
+			//create_buffer(&output->buffer, output->state->shm, surface_width, surface_height, WL_SHM_FORMAT_ARGB8888, output);
+			return;
+		}
 
 		const int im_width = anim->lbm_image.width;
 		const int im_height = anim->lbm_image.height;
@@ -234,7 +257,6 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 		// Get "center" "fit" or "fill" from output config. Stretching not supported
 		//
 		// This is horribly inefficient
-		// TODO: Reuse old buffers. Would save the lookup from pixel no.->palette color
 		// TODO: track damage in cycle_palette. Only update the pixels that change.
 		// TODO: copy from image source to surface. Instead of other way around. only 640x480 pixels to copy
 		//
@@ -243,6 +265,7 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 		unsigned char* surface_row = output->buffer.data;
 		const struct image *source_image = &anim->lbm_image;
 		const unsigned char *source_pixels = source_image->pixels;
+
 		for(unsigned int row = 0; row < surface_height; row ++){
 			int source_row = row % (im_height*image_scale);
 			for( unsigned int col = 0; col < surface_width; col++ )
@@ -276,9 +299,11 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 			}
 			surface_row += output->width * PIXEL_SIZE * output->scale;
 		}
-	wl_surface_set_buffer_scale(output->surface, output->scale);
-	wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
-	wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
+		printf("attaching buffer %p\n", output->buffer.buffer);
+		wl_surface_set_buffer_scale(output->surface, output->scale);
+		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
+		wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
+		output->buffer.available = false;
 	}
 	wl_surface_commit(output->surface);
 }
@@ -704,8 +729,11 @@ int main(int argc, char **argv) {
 
 	state.run_display = true;
 	while (wl_display_dispatch(state.display) != -1 && state.run_display) {
+#define PROFILE
+#ifdef PROFILE
 		static int times = 1000;
 		if(times-- == 0) state.run_display = false;
+#endif
 		// Send acks, and determine which images need to be loaded
 		struct swaybg_output *output;
 		wl_list_for_each(output, &state.outputs, link) {

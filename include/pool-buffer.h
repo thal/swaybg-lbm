@@ -11,10 +11,13 @@ struct pool_buffer {
 	cairo_t *cairo;
 	void *data;
 	size_t size;
+	bool available;
 };
 
+struct swaybg_output;
+
 bool create_buffer(struct pool_buffer *buffer, struct wl_shm *shm,
-		int32_t width, int32_t height, uint32_t format);
+		int32_t width, int32_t height, uint32_t format, struct swaybg_output *output);
 void destroy_buffer(struct pool_buffer *buffer);
 
 #endif

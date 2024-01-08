@@ -37,8 +37,10 @@ static int anonymous_shm_open(void) {
 	return -1;
 }
 
+extern struct wl_buffer_listener buffer_listener;
+
 bool create_buffer(struct pool_buffer *buf, struct wl_shm *shm,
-		int32_t width, int32_t height, uint32_t format) {
+		int32_t width, int32_t height, uint32_t format, struct swaybg_output *output) {
 	uint32_t stride = width * 4;
 	size_t size = stride * height;
 
@@ -62,6 +64,7 @@ bool create_buffer(struct pool_buffer *buf, struct wl_shm *shm,
 	buf->surface = cairo_image_surface_create_for_data(data,
 			CAIRO_FORMAT_ARGB32, width, height, stride);
 	buf->cairo = cairo_create(buf->surface);
+	wl_buffer_add_listener(buf->buffer, &buffer_listener, output);
 	return true;
 }
 
@@ -78,4 +81,5 @@ void destroy_buffer(struct pool_buffer *buffer) {
 	if (buffer->data) {
 		munmap(buffer->data, buffer->size);
 	}
+	memset(buffer, 0, sizeof(struct pool_buffer));
 }
