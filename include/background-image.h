@@ -14,9 +14,16 @@ enum background_mode {
 	BACKGROUND_MODE_INVALID,
 };
 
+struct pixel_list {
+	size_t n_pixels;	// Number of pixels in this range
+	unsigned int *pixels; // A list of indices into the image data buffer in bytes
+};
+
 struct animated_image {
 	struct image lbm_image;
-	uint16_t *cycle_idxs;
+	uint16_t *cycle_idxs; // The position of each cycle as an array of 14-bit unsigned ints.
+						  // Stored in the order of the list in struct image::range
+	struct pixel_list *pixels_for_cycle; // List of pixels in each range
 };
 
 struct swaybg_image {
@@ -32,5 +39,6 @@ struct animated_image *load_animated_background_image(const char *path);
 void render_background_image(cairo_t *cairo, cairo_surface_t *image,
 		enum background_mode mode, int buffer_width, int buffer_height);
 bool cycle_palette(struct animated_image* anim);
+void prepare_native_buffer( void **buffer, struct animated_image *src_img, int width, int height, int origin, int scale);
 
 #endif

@@ -88,6 +88,7 @@ struct swaybg_output {
 	uint32_t frame_count;
 
 	struct pool_buffer buffer;
+	void *native_buffer;
 	struct wl_list link;
 };
 
@@ -127,6 +128,7 @@ const struct wl_buffer_listener buffer_listener = {
 };
 
 static const struct wl_callback_listener wl_surface_frame_listener;
+
 
 static void render_frame(struct swaybg_output *output, cairo_surface_t *surface) {
 	int buffer_width = output->width * output->scale,
@@ -204,9 +206,13 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 
 	if(output->config->image->anim) {
+		prepare_native_buffer(&output->native_buffer, output->config->image->anim, buffer_width, buffer_height, 0, 2);
 		struct wl_callback *cb = wl_surface_frame(output->surface);
 		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
 		printf("Added listener for %d\n", output->wl_name);
+		const unsigned int surface_width = output->width * output->scale;
+		const unsigned int surface_height = output->height * output->scale;
+		memcpy( output->buffer.data, output->native_buffer, surface_width * surface_height * 4);
 	}
 
 	wl_surface_set_buffer_scale(output->surface, output->scale);
@@ -235,9 +241,6 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 	//printf("%s %d %d x %d, %d\n",__FUNCTION__, output->wl_name, output->width, output->height, output->scale);
 
 	if(do_render) {
-		unsigned int surface_width = output->width * output->scale;
-		unsigned int surface_height = output->height * output->scale;
-
 		bool buffer_size_changed = false; // TODO: check if size has changed
 		if( buffer_size_changed || !output->buffer.available ) {
 			printf("%s can't reuse buffer\n", __FUNCTION__);
@@ -249,55 +252,43 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 			return;
 		}
 
-		const int im_width = anim->lbm_image.width;
-		const int im_height = anim->lbm_image.height;
-
-		// TODO: all that is needed to position and scale is a origin and a scale factor. Do all sampling relative to origin
-		// Only integer scaling supported
-		// Get "center" "fit" or "fill" from output config. Stretching not supported
-		//
-		// This is horribly inefficient
-		// TODO: track damage in cycle_palette. Only update the pixels that change.
-		// TODO: copy from image source to surface. Instead of other way around. only 640x480 pixels to copy
-		//
-		const int image_scale = 2;
+		// Most frames don't actually cycle all ranges.
+		// For further optimization, only update the pixels in the ranges that cycled
+		// (return this through cycle_palette somehow?)
 		static const int PIXEL_SIZE = 4;
-		unsigned char* surface_row = output->buffer.data;
-		const struct image *source_image = &anim->lbm_image;
-		const unsigned char *source_pixels = source_image->pixels;
+		const struct image *lbm_image = &anim->lbm_image;
+		const struct pixel_list *lists = anim->pixels_for_cycle;
 
-		for(unsigned int row = 0; row < surface_height; row ++){
-			int source_row = row % (im_height*image_scale);
-			for( unsigned int col = 0; col < surface_width; col++ )
+		for(int i = 0; i < lbm_image->num_ranges; i++) {
+			const struct pixel_list range_pixels = lists[i];
+			for(unsigned int list_idx = 0; list_idx < range_pixels.n_pixels; list_idx++ )
 			{
-				int sourcecol = col % (im_width * image_scale);
-				unsigned char* a = &surface_row[col*PIXEL_SIZE + 3];
-				unsigned char* r = &surface_row[col*PIXEL_SIZE + 2];
-				unsigned char* g = &surface_row[col*PIXEL_SIZE + 1];
-				unsigned char* b = &surface_row[col*PIXEL_SIZE + 0];
-				*a = 255; // a = 0 gives apparently halfish brightness... How is the alpha byte interpreted?
-				unsigned char pixel = source_pixels[(source_row/ image_scale)*source_image->width + (sourcecol/image_scale)];
-				*r = source_image->palette[pixel].r;
-				*b = source_image->palette[pixel].b;
-				*g = source_image->palette[pixel].g;
+				const uint32_t pixel_idx = range_pixels.pixels[list_idx];
+				const unsigned char pixel = lbm_image->pixels[pixel_idx];
+				struct color newcolor = lbm_image->palette[pixel];
 
-				// Test pattern
-#if 0
-				if( row % 16 != 0 && col % 16 != 0)
-				{
-					*r = 255;
-					*g = 255;
-					*b = 255;
+				const unsigned int src_row = pixel_idx / lbm_image->width;
+				const unsigned int src_col = pixel_idx % lbm_image->width;
+				static const int image_scale = 2; // TODO: get from config
+				const unsigned int dst_pixel_stride = output->width * output->scale;
+
+				// Draw each pixel from the source image scale^2 times
+				for(int square_x = 0; square_x < image_scale; square_x++) {
+					for(int square_y = 0; square_y < image_scale; square_y++) {
+						unsigned int dst_idx = (((src_row *image_scale) + square_y) * dst_pixel_stride) + (((src_col * image_scale)+square_x) );
+
+						// TODO: store lbm image data in same format. Then can copy the whole 32-bits in one
+						unsigned char *a = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 3];
+						unsigned char *r = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 2];
+						unsigned char *g = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 1];
+						unsigned char *b = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 0];
+						*a = 255;
+						*r = newcolor.r;
+						*g = newcolor.g;
+						*b = newcolor.b;
+					}
 				}
-				else
-				{
-					*r = 0;
-					*g = 0;
-					*b = 0;
-				}
-#endif
 			}
-			surface_row += output->width * PIXEL_SIZE * output->scale;
 		}
 		printf("attaching buffer %p\n", output->buffer.buffer);
 		wl_surface_set_buffer_scale(output->surface, output->scale);
@@ -729,7 +720,6 @@ int main(int argc, char **argv) {
 
 	state.run_display = true;
 	while (wl_display_dispatch(state.display) != -1 && state.run_display) {
-#define PROFILE
 #ifdef PROFILE
 		static int times = 1000;
 		if(times-- == 0) state.run_display = false;

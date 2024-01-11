@@ -69,6 +69,46 @@ struct animated_image *load_animated_background_image(const char *path) {
 	if( ret->cycle_idxs == NULL ) {
 		goto error;
 	}
+
+	// For each range, track the pixels that are affected
+	ret->pixels_for_cycle = calloc(ret->lbm_image.num_ranges, sizeof(struct pixel_list));
+
+	// count pixels in each range
+	// allocate pixel lists
+	// loop over all pixels again
+	// fill pixel lists with offset
+
+	int i = 0;
+	for(struct colrange* range = ret->lbm_image.range;
+			range != NULL; range=range->next) {
+		unsigned int pixels_in_range = 0;
+		for(int row = 0; row < ret->lbm_image.height; row++) {
+			for( int col = 0; col < ret->lbm_image.width; col++) {
+				unsigned int p_index = row*ret->lbm_image.width + col;
+				unsigned char p = ret->lbm_image.pixels[p_index];
+				if( p >= range->low && p <= range->high ) {
+					pixels_in_range++;
+				}
+			}
+		}
+		ret->pixels_for_cycle[i].n_pixels = pixels_in_range;
+		ret->pixels_for_cycle[i].pixels = calloc(pixels_in_range, sizeof(unsigned int));
+
+		unsigned int range_idx = 0;
+		unsigned int* pixels = ret->pixels_for_cycle[i].pixels;
+		for(int row = 0; row < ret->lbm_image.height; row++) {
+			for( int col = 0; col < ret->lbm_image.width; col++) {
+				unsigned int p_index = row*ret->lbm_image.width + col;
+				unsigned char p = ret->lbm_image.pixels[p_index];
+				if( p >= range->low && p <= range->high ) {
+					pixels[range_idx++] = p_index;
+				}
+			}
+		}
+		assert(range_idx == pixels_in_range);
+		i++;
+	}
+
 #if 0
 	swaybg_log(LOG_DEBUG, "Loaded LBM image with %d ranges:\n", ret->lbm_image.num_ranges);
 	for(struct colrange* range = ret->lbm_image.range;
@@ -197,4 +237,44 @@ bool cycle_palette( struct animated_image *anim )
 		i++;
 	}
 	return ret;
+}
+
+// Prepare a buffer that matches the size, layout, and format of the output's wl_buffer,
+// so that it can be efficiently memcpy'd
+void prepare_native_buffer( void **buffer,
+							struct animated_image *src_img,
+							int dst_width,
+							int dst_height,
+							int origin,
+							int scale) {
+	// Assumes 4 bytes per pixel, ARGB, little-endian
+	void *dst_buf = calloc( dst_width * dst_height, 4 );
+	const struct image *lbm_image = &src_img->lbm_image;
+	assert(dst_buf);
+
+	static const int PIXEL_SIZE = 4;
+	const int dst_stride = dst_width * PIXEL_SIZE;
+	unsigned char *row_start = dst_buf;
+	for(int row = 0; row < dst_height; row++) {
+		if( row / scale >= lbm_image->height) break;
+
+		for( int col = 0; col < dst_width; col++) {
+			if( col / scale >= lbm_image->width) break;
+
+			unsigned char* a = &row_start[col*PIXEL_SIZE + 3];
+			unsigned char* r = &row_start[col*PIXEL_SIZE + 2];
+			unsigned char* g = &row_start[col*PIXEL_SIZE + 1];
+			unsigned char* b = &row_start[col*PIXEL_SIZE + 0];
+			unsigned char pixel = lbm_image->pixels[((row/scale) * src_img->lbm_image.width) + col/scale];
+
+			*a = 255;
+			*r = lbm_image->palette[pixel].r;
+			*g = lbm_image->palette[pixel].g;
+			*b = lbm_image->palette[pixel].b;
+			
+		}
+		row_start += dst_stride;
+	}
+	
+	*buffer = dst_buf;
 }
