@@ -255,17 +255,17 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 		// Most frames don't actually cycle all ranges.
 		// For further optimization, only update the pixels in the ranges that cycled
 		// (return this through cycle_palette somehow?)
-		static const int PIXEL_SIZE = 4;
 		const struct image *lbm_image = &anim->lbm_image;
 		const struct pixel_list *lists = anim->pixels_for_cycle;
 
+		uint32_t *dest_buf = output->buffer.data;
 		for(int i = 0; i < lbm_image->num_ranges; i++) {
 			const struct pixel_list range_pixels = lists[i];
 			for(unsigned int list_idx = 0; list_idx < range_pixels.n_pixels; list_idx++ )
 			{
 				const uint32_t pixel_idx = range_pixels.pixels[list_idx];
 				const unsigned char pixel = lbm_image->pixels[pixel_idx];
-				struct color newcolor = lbm_image->palette[pixel];
+				const uint32_t newcolor = *(uint32_t*)&lbm_image->palette[pixel];
 
 				const unsigned int src_row = pixel_idx / lbm_image->width;
 				const unsigned int src_col = pixel_idx % lbm_image->width;
@@ -273,20 +273,16 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 				const unsigned int dst_pixel_stride = output->width * output->scale;
 
 				// Draw each pixel from the source image scale^2 times
-				for(int square_x = 0; square_x < image_scale; square_x++) {
-					for(int square_y = 0; square_y < image_scale; square_y++) {
-						unsigned int dst_idx = (((src_row *image_scale) + square_y) * dst_pixel_stride) + (((src_col * image_scale)+square_x) );
+				for(int square_y = 0; square_y < image_scale; square_y++) {
+					//unsigned int dst_idx = (((src_row *image_scale) + square_y) * dst_pixel_stride) + (((src_col * image_scale)+square_x) );
+					unsigned int dst_idx = (((src_row *image_scale) + square_y) * dst_pixel_stride) + ((src_col * image_scale) );
 
-						// TODO: store lbm image data in same format. Then can copy the whole 32-bits in one
-						unsigned char *a = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 3];
-						unsigned char *r = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 2];
-						unsigned char *g = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 1];
-						unsigned char *b = &output->buffer.data[(dst_idx*PIXEL_SIZE) + 0];
-						*a = 255;
-						*r = newcolor.r;
-						*g = newcolor.g;
-						*b = newcolor.b;
-					}
+					// Need to profile and see if there's actually any point in unrolling this loop
+					dest_buf[dst_idx] = newcolor;
+					if(image_scale < 2) continue;
+					dest_buf[dst_idx+1] = newcolor;
+					if(image_scale < 3) continue;
+					dest_buf[dst_idx+2] = newcolor;
 				}
 			}
 		}

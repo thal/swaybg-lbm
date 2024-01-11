@@ -109,6 +109,18 @@ struct animated_image *load_animated_background_image(const char *path) {
 		i++;
 	}
 
+	static const int palette_size = sizeof(ret->lbm_image.palette)/sizeof(ret->lbm_image.palette[0]);
+	for(int i = 0; i < palette_size; i++) {
+		// Assuming little-endian
+		struct color palette_color = ret->lbm_image.palette[i];
+		static const uint8_t a = 0xff;
+		const uint32_t newcolor = a << 24 |
+			palette_color.r << 16 |
+			palette_color.g << 8  |
+			palette_color.b;
+		*(uint32_t*)(&ret->lbm_image.palette[i]) = newcolor;
+	}
+
 #if 0
 	swaybg_log(LOG_DEBUG, "Loaded LBM image with %d ranges:\n", ret->lbm_image.num_ranges);
 	for(struct colrange* range = ret->lbm_image.range;
@@ -252,25 +264,17 @@ void prepare_native_buffer( void **buffer,
 	const struct image *lbm_image = &src_img->lbm_image;
 	assert(dst_buf);
 
-	static const int PIXEL_SIZE = 4;
-	const int dst_stride = dst_width * PIXEL_SIZE;
-	unsigned char *row_start = dst_buf;
+	const int dst_stride = dst_width;
+	uint32_t *row_start = dst_buf;
 	for(int row = 0; row < dst_height; row++) {
 		if( row / scale >= lbm_image->height) break;
 
 		for( int col = 0; col < dst_width; col++) {
 			if( col / scale >= lbm_image->width) break;
 
-			unsigned char* a = &row_start[col*PIXEL_SIZE + 3];
-			unsigned char* r = &row_start[col*PIXEL_SIZE + 2];
-			unsigned char* g = &row_start[col*PIXEL_SIZE + 1];
-			unsigned char* b = &row_start[col*PIXEL_SIZE + 0];
 			unsigned char pixel = lbm_image->pixels[((row/scale) * src_img->lbm_image.width) + col/scale];
-
-			*a = 255;
-			*r = lbm_image->palette[pixel].r;
-			*g = lbm_image->palette[pixel].g;
-			*b = lbm_image->palette[pixel].b;
+			uint32_t color = *(uint32_t*)(&lbm_image->palette[pixel]);
+			row_start[col] = color;
 			
 		}
 		row_start += dst_stride;
