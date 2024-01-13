@@ -247,15 +247,20 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 			return;
 		}
 
-		// Most frames don't actually cycle all ranges.
-		// For further optimization, only update the pixels in the ranges that cycled
-		// (return this through cycle_palette somehow?)
 		const struct image *lbm_image = &anim->lbm_image;
-		const struct pixel_list *lists = anim->pixels_for_cycle;
+		struct pixel_list *lists = anim->pixels_for_cycle;
 
 		uint32_t *dest_buf = output->buffer.data;
+		int32_t dmg_maxx = 0, dmg_maxy = 0, dmg_minx = INT_MAX, dmg_miny = INT_MAX;
+		static const int image_scale = 2; // TODO: get from config
 		for(int i = 0; i < lbm_image->num_ranges; i++) {
 			const struct pixel_list range_pixels = lists[i];
+			if( !range_pixels.damaged ) {
+				continue;
+			} else {
+				lists[i].damaged = false;
+			}
+
 			for(unsigned int list_idx = 0; list_idx < range_pixels.n_pixels; list_idx++ )
 			{
 				const uint32_t pixel_idx = range_pixels.pixels[list_idx];
@@ -264,7 +269,6 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 
 				const unsigned int src_row = pixel_idx / lbm_image->width;
 				const unsigned int src_col = pixel_idx % lbm_image->width;
-				static const int image_scale = 2; // TODO: get from config
 				const unsigned int dst_pixel_stride = output->width * output->scale;
 
 				// Draw each pixel from the source image scale^2 times
@@ -280,11 +284,28 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 					dest_buf[dst_idx+2] = newcolor;
 				}
 			}
+			if(range_pixels.max_x > dmg_maxx) {
+				dmg_maxx = range_pixels.max_x;
+			}
+			if(range_pixels.max_y > dmg_maxy) {
+				dmg_maxy = range_pixels.max_y;
+			}
+			if(range_pixels.min_x < dmg_minx) {
+				dmg_minx = range_pixels.min_x;
+			}
+			if(range_pixels.min_y < dmg_miny) {
+				dmg_miny = range_pixels.min_y;
+			}
 		}
 		swaybg_log(LOG_DEBUG, "attaching buffer %p", output->buffer.buffer);
 		wl_surface_set_buffer_scale(output->surface, output->scale);
 		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
-		wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
+		// TODO: This needs to not assume the origin of the image is displayed at 0,0
+		wl_surface_damage_buffer(output->surface,
+				dmg_minx*image_scale,
+				dmg_miny*image_scale,
+				(dmg_maxx-dmg_minx+1)*image_scale,
+				(dmg_maxy-dmg_miny+1)*image_scale);
 		output->buffer.available = false;
 	}
 

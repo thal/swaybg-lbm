@@ -77,6 +77,7 @@ struct animated_image *load_animated_background_image(const char *path) {
 	// allocate pixel lists
 	// loop over all pixels again
 	// fill pixel lists with offset
+	// while we're at it, store the bounding box of the pixels in this range
 
 	int i = 0;
 	for(struct colrange* range = ret->lbm_image.range;
@@ -91,27 +92,44 @@ struct animated_image *load_animated_background_image(const char *path) {
 				}
 			}
 		}
-		ret->pixels_for_cycle[i].n_pixels = pixels_in_range;
-		ret->pixels_for_cycle[i].pixels = calloc(pixels_in_range, sizeof(unsigned int));
+		struct pixel_list *this_range = &ret->pixels_for_cycle[i];
+		this_range->min_x = INT_MAX;
+		this_range->min_y = INT_MAX;
+		this_range->n_pixels = pixels_in_range;
+		this_range->pixels = calloc(pixels_in_range, sizeof(unsigned int));
 
 		unsigned int range_idx = 0;
-		unsigned int* pixels = ret->pixels_for_cycle[i].pixels;
+		unsigned int* pixels = this_range->pixels;
 		for(int row = 0; row < ret->lbm_image.height; row++) {
 			for( int col = 0; col < ret->lbm_image.width; col++) {
 				unsigned int p_index = row*ret->lbm_image.width + col;
 				unsigned char p = ret->lbm_image.pixels[p_index];
 				if( p >= range->low && p <= range->high ) {
 					pixels[range_idx++] = p_index;
+					if(row > this_range->max_y ) {
+						this_range->max_y = row;
+					}
+					if(row < this_range->min_y ) {
+						this_range->min_y = row;
+					}
+					if(col > this_range->max_x ) {
+						this_range->max_x = col;
+					}
+					if(col < this_range->min_x ) {
+						this_range->min_x = col;
+					}
 				}
 			}
 		}
 		assert(range_idx == pixels_in_range);
+		swaybg_log(LOG_DEBUG, "%s Range %d: %ld pixels, {%04d,%04d} to {%04d,%04d}",
+				__FUNCTION__, i, this_range->n_pixels, this_range->min_x, this_range->min_y, this_range->max_x, this_range->max_y);
 		i++;
 	}
 
+	// Convert the palette colors to 32-bit ARGB8888
 	static const int palette_size = sizeof(ret->lbm_image.palette)/sizeof(ret->lbm_image.palette[0]);
 	for(int i = 0; i < palette_size; i++) {
-		// Assuming little-endian
 		struct color palette_color = ret->lbm_image.palette[i];
 		static const uint8_t a = 0xff;
 		const uint32_t newcolor = a << 24 |
@@ -243,6 +261,7 @@ bool cycle_palette( struct animated_image *anim )
 						&anim->lbm_image.palette[range->low],
 						(range->high - range->low) * sizeof(anim->lbm_image.palette[0]) );
 			anim->lbm_image.palette[range->low] = last;
+			anim->pixels_for_cycle[i].damaged = true;
 			ret = true;
 		}
 		anim->cycle_idxs[i] = newidx;

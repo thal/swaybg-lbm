@@ -17,6 +17,9 @@ enum background_mode {
 struct pixel_list {
 	size_t n_pixels;	// Number of pixels in this range
 	unsigned int *pixels; // A list of indices into the image data buffer in bytes
+	int32_t min_x, min_y, max_x, max_y;
+	bool damaged;			// If this range was affected by a call to cycle_palette.
+							// Users should clear this after reading the updated values
 };
 
 struct animated_image {
@@ -38,7 +41,7 @@ cairo_surface_t *load_background_image(const char *path);
 struct animated_image *load_animated_background_image(const char *path);
 void render_background_image(cairo_t *cairo, cairo_surface_t *image,
 		enum background_mode mode, int buffer_width, int buffer_height);
-bool cycle_palette(struct animated_image* anim);
+bool cycle_palette(struct animated_image *anim);
 void prepare_native_buffer( void **buffer, struct animated_image *src_img, int width, int height, int origin, int scale);
 
 #endif
