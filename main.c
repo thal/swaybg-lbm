@@ -112,13 +112,13 @@ bool is_valid_color(const char *color) {
 
 void release_buffer(void *data, struct wl_buffer *buffer) {
 	struct swaybg_output *output = data;
-	printf("%s %p \n",__FUNCTION__, buffer);
+	swaybg_log(LOG_DEBUG, "%s %p",__FUNCTION__, buffer);
 	if( output->buffer.buffer == buffer ) { // If frame callback is not reallocating buffer, this is always the case
 		// Let the output reuse this buffer if it can
 		output->buffer.available = true;
-		printf("%s Reusing %p\n",__FUNCTION__, buffer);
+		swaybg_log(LOG_DEBUG, "%s Reusing %p",__FUNCTION__, buffer);
 	} else {
-		printf("%s Destroying %p\n",__FUNCTION__, buffer);
+		swaybg_log(LOG_DEBUG, "%s Destroying %p",__FUNCTION__, buffer);
 		destroy_buffer(&output->buffer);
 	}
 }
@@ -209,7 +209,7 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		prepare_native_buffer(&output->native_buffer, output->config->image->anim, buffer_width, buffer_height, 0, 2);
 		struct wl_callback *cb = wl_surface_frame(output->surface);
 		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
-		printf("Added listener for %d\n", output->wl_name);
+		swaybg_log(LOG_DEBUG, "Added listener for %d", output->wl_name);
 		const unsigned int surface_width = output->width * output->scale;
 		const unsigned int surface_height = output->height * output->scale;
 		memcpy( output->buffer.data, output->native_buffer, surface_width * surface_height * 4);
@@ -238,12 +238,10 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 		do_render = cycle_palette(anim);
 	}
 
-	//printf("%s %d %d x %d, %d\n",__FUNCTION__, output->wl_name, output->width, output->height, output->scale);
-
 	if(do_render) {
 		bool buffer_size_changed = false; // TODO: check if size has changed
 		if( buffer_size_changed || !output->buffer.available ) {
-			printf("%s can't reuse buffer\n", __FUNCTION__);
+			swaybg_log(LOG_DEBUG, "%s No buffer available. Skipping frame", __FUNCTION__);
 			// Can't use the current buffer. Either it's the wrong size or the compositor hasn't released it
 			// If the buffer isn't free yet, just hope it will be released eventually. Seems to be the case.
 			// If the compositor ever fails to release a buffer, the animation will stop. Should handle this somehow.
@@ -286,19 +284,21 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 				}
 			}
 		}
-		printf("attaching buffer %p\n", output->buffer.buffer);
+		swaybg_log(LOG_DEBUG, "attaching buffer %p", output->buffer.buffer);
 		wl_surface_set_buffer_scale(output->surface, output->scale);
 		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
 		wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
 		output->buffer.available = false;
 	}
 	wl_surface_commit(output->surface);
+
 }
 
 static void wl_surface_frame_done(void *data, struct wl_callback *cb, uint32_t time) {
 	wl_callback_destroy(cb);
 
 	struct swaybg_output *output = data;
+	swaybg_log(LOG_DEBUG, "%s %s %d", __FUNCTION__, output->name, time);
 	render_animated_frame(output, output->config->image->anim);
 	output->last_frame_time = time;
 }
@@ -354,7 +354,8 @@ static void layer_surface_configure(void *data,
 	output->dirty = true;
 	output->configure_serial = serial;
 	output->needs_ack = true;
-	printf("Dirtying output because of configure. Output surface needs ack\n");
+	swaybg_log(LOG_DEBUG, "Dirtying output %s because of configure{%p,%d,%d,%d}. Output surface needs ack",
+				output->name, surface, width, height, serial);
 }
 
 static void layer_surface_closed(void *data,
@@ -663,7 +664,7 @@ static void parse_command_line(int argc, char **argv,
 }
 
 int main(int argc, char **argv) {
-	swaybg_log_init(LOG_DEBUG);
+	swaybg_log_init(LOG_INFO);
 
 	struct swaybg_state state = {0};
 	wl_list_init(&state.configs);
@@ -728,7 +729,7 @@ int main(int argc, char **argv) {
 				zwlr_layer_surface_v1_ack_configure(
 						output->layer_surface,
 						output->configure_serial);
-				printf("Acking\n");
+				swaybg_log(LOG_DEBUG, "Acking");
 			}
 
 			int buffer_width = output->width * output->scale,
