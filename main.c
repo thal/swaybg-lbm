@@ -227,9 +227,6 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 static void render_animated_frame(struct swaybg_output* output, struct animated_image* anim)
 {
-	struct wl_callback *cb = wl_surface_frame(output->surface);
-	wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
-
 	bool do_render = false;
 	if( &output->link == output->state->outputs.next ) {
 		// Let the first display drive the animation
@@ -290,6 +287,10 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 		wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
 		output->buffer.available = false;
 	}
+
+	struct wl_callback *cb = wl_surface_frame(output->surface);
+	wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
+
 	wl_surface_commit(output->surface);
 
 }
@@ -299,6 +300,7 @@ static void wl_surface_frame_done(void *data, struct wl_callback *cb, uint32_t t
 
 	struct swaybg_output *output = data;
 	swaybg_log(LOG_DEBUG, "%s %s %d", __FUNCTION__, output->name, time);
+	output->dirty = false;
 	render_animated_frame(output, output->config->image->anim);
 	output->last_frame_time = time;
 }
