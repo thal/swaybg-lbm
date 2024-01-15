@@ -90,6 +90,8 @@ executable(
 		'log.c',
 		'main.c',
 		'pool-buffer.c',
+        'iff.c',
+        'lbm.c',
 		protos_src,
 	],
 	include_directories: 'include',

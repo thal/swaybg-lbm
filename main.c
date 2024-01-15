@@ -15,8 +15,6 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "single-pixel-buffer-v1-client-protocol.h"
-#include "imagelbm.h"
-
 
 /*
  * If `color` is a hexadecimal string of the form 'rrggbb' or '#rrggbb',
@@ -247,13 +245,13 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 			return;
 		}
 
-		const struct image *lbm_image = &anim->lbm_image;
+		const struct lbm_image *lbm_image = &anim->lbm_image;
 		struct pixel_list *lists = anim->pixels_for_cycle;
 
 		uint32_t *dest_buf = output->buffer.data;
 		int32_t dmg_maxx = 0, dmg_maxy = 0, dmg_minx = INT_MAX, dmg_miny = INT_MAX;
 		static const int image_scale = 2; // TODO: get from config
-		for(int i = 0; i < lbm_image->num_ranges; i++) {
+		for(int i = 0; i < lbm_image->n_ranges; i++) {
 			const struct pixel_list range_pixels = lists[i];
 			if( !range_pixels.damaged ) {
 				continue;

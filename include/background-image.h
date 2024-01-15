@@ -2,7 +2,7 @@
 #define _SWAY_BACKGROUND_IMAGE_H
 #include <stdbool.h>
 #include "cairo_util.h"
-#include "imagelbm.h"
+#include "lbm.h"
 
 enum background_mode {
 	BACKGROUND_MODE_STRETCH,
@@ -23,7 +23,7 @@ struct pixel_list {
 };
 
 struct animated_image {
-	struct image lbm_image;
+	struct lbm_image lbm_image;
 	uint16_t *cycle_idxs; // The position of each cycle as an array of 14-bit unsigned ints.
 						  // Stored in the order of the list in struct image::range
 	struct pixel_list *pixels_for_cycle; // List of pixels in each range

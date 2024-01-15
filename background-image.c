@@ -53,25 +53,28 @@ cairo_surface_t *load_background_image(const char *path) {
 }
 
 struct animated_image *load_animated_background_image(const char *path) {
+
 	struct animated_image *ret = calloc(1, sizeof(struct animated_image));
-	FILE *f = NULL;
-	if( !ret ) {
-		goto error;
-	}
-	f = fopen(path, "rb");
-	if( !f ) {
-		goto error;
-	}
-	if( 0 != load_image_lbm(&ret->lbm_image, f)) {
-		goto error;
-	}
-	ret->cycle_idxs = calloc(ret->lbm_image.num_ranges, sizeof(ret->cycle_idxs[0]));
-	if( ret->cycle_idxs == NULL ) {
+
+	if(!ret) {
 		goto error;
 	}
 
+	// TODO: dont do this. Move struct animated_image fields into struct lbm_image instead. Allocate it all in one
+	struct lbm_image *tmp = read_lbm_image(path);
+	if(!tmp) {
+		goto error;
+	}
+	// TODO: dont do this. Move struct animated_image fields into struct lbm_image instead. Allocate it all in one
+	ret->lbm_image = *tmp;
+	free(tmp);
+
+	ret->cycle_idxs = calloc(ret->lbm_image.n_ranges, sizeof(ret->cycle_idxs[0]));
+	if( ret->cycle_idxs == NULL ) {
+		goto error;
+	}
 	// For each range, track the pixels that are affected
-	ret->pixels_for_cycle = calloc(ret->lbm_image.num_ranges, sizeof(struct pixel_list));
+	ret->pixels_for_cycle = calloc(ret->lbm_image.n_ranges, sizeof(struct pixel_list));
 
 	// count pixels in each range
 	// allocate pixel lists
@@ -80,7 +83,7 @@ struct animated_image *load_animated_background_image(const char *path) {
 	// while we're at it, store the bounding box of the pixels in this range
 
 	int i = 0;
-	for(struct colrange* range = ret->lbm_image.range;
+	for(struct color_range* range = ret->lbm_image.range;
 			range != NULL; range=range->next) {
 		unsigned int pixels_in_range = 0;
 		for(int row = 0; row < ret->lbm_image.height; row++) {
@@ -103,7 +106,7 @@ struct animated_image *load_animated_background_image(const char *path) {
 		for(int row = 0; row < ret->lbm_image.height; row++) {
 			for( int col = 0; col < ret->lbm_image.width; col++) {
 				unsigned int p_index = row*ret->lbm_image.width + col;
-				unsigned char p = ret->lbm_image.pixels[p_index];
+				uint8_t p = ret->lbm_image.pixels[p_index];
 				if( p >= range->low && p <= range->high ) {
 					pixels[range_idx++] = p_index;
 					if(row > this_range->max_y ) {
@@ -126,34 +129,20 @@ struct animated_image *load_animated_background_image(const char *path) {
 				__FUNCTION__, i, this_range->n_pixels, this_range->min_x, this_range->min_y, this_range->max_x, this_range->max_y);
 		i++;
 	}
-
-	// Convert the palette colors to 32-bit ARGB8888
-	static const int palette_size = sizeof(ret->lbm_image.palette)/sizeof(ret->lbm_image.palette[0]);
-	for(int i = 0; i < palette_size; i++) {
-		struct color palette_color = ret->lbm_image.palette[i];
-		static const uint8_t a = 0xff;
-		const uint32_t newcolor = a << 24 |
-			palette_color.r << 16 |
-			palette_color.g << 8  |
-			palette_color.b;
-		*(uint32_t*)(&ret->lbm_image.palette[i]) = newcolor;
-	}
-
 #if 0
-	swaybg_log(LOG_DEBUG, "Loaded LBM image with %d ranges:\n", ret->lbm_image.num_ranges);
-	for(struct colrange* range = ret->lbm_image.range;
+	swaybg_log(LOG_DEBUG, "Loaded LBM image with %d ranges:\n", ret->lbm_image.n_ranges);
+	for(struct color_range* range = ret->lbm_image.range;
 			range != NULL; range=range->next)
 	{
-		swaybg_log(LOG_DEBUG, "%03d-%03d, mode %d, rate %d (%.3f Hz)",
+		swaybg_log(LOG_DEBUG, "%03d-%03d, rate %d (%.3f Hz)",
 				range->low, range->high,
-				range->cmode,
 				range->rate, (float)(1<<14) / range->rate);
 	}
 	int pixcnt = 0;
 	for(int row = 0; row < ret->lbm_image.height; row++) {
 		for( int col = 0; col < ret->lbm_image.width; col++) {
 			unsigned char p = ret->lbm_image.pixels[row*ret->lbm_image.width + col];
-			for(struct colrange* range = ret->lbm_image.range;
+			for(struct color_range* range = ret->lbm_image.range;
 					range != NULL; range=range->next) {
 				if( p >= range->low && p <= range->high ) pixcnt++;
 			}
@@ -170,7 +159,6 @@ error:
 	free(ret);
 	ret = NULL;
 exit:
-	if(f) fclose(f);
 	return ret;
 }
 
@@ -251,12 +239,12 @@ bool cycle_palette( struct animated_image *anim )
 
 	bool ret = false;
 	int i = 0;
-	for(struct colrange* range = anim->lbm_image.range;
+	for(struct color_range* range = anim->lbm_image.range;
 			range != NULL; range=range->next) {
 		// Increment each color range by its rate mod 2^14. If it overflows, perform the cycle
 		uint16_t newidx = (anim->cycle_idxs[i] + range->rate) % mod;
 		if(newidx < anim->cycle_idxs[i]) {
-			struct color last = anim->lbm_image.palette[range->high];
+			color_register last = anim->lbm_image.palette[range->high];
 			memmove( &anim->lbm_image.palette[range->low+1],
 						&anim->lbm_image.palette[range->low],
 						(range->high - range->low) * sizeof(anim->lbm_image.palette[0]) );
@@ -280,7 +268,7 @@ void prepare_native_buffer( void **buffer,
 							int scale) {
 	// Assumes 4 bytes per pixel, ARGB, little-endian
 	void *dst_buf = calloc( dst_width * dst_height, 4 );
-	const struct image *lbm_image = &src_img->lbm_image;
+	const struct lbm_image *lbm_image = &src_img->lbm_image;
 	assert(dst_buf);
 
 	const int dst_stride = dst_width;
