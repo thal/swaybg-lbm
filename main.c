@@ -15,6 +15,7 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "single-pixel-buffer-v1-client-protocol.h"
+#include "lbm.h"
 
 /*
  * If `color` is a hexadecimal string of the form 'rrggbb' or '#rrggbb',
@@ -204,7 +205,7 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 
 	if(output->config->image->anim) {
-		prepare_native_buffer(&output->native_buffer, output->config->image->anim, buffer_width, buffer_height, 0, 2);
+		render_lbm_image(&output->native_buffer, output->config->image->anim, buffer_width, buffer_height, 2);
 		struct wl_callback *cb = wl_surface_frame(output->surface);
 		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
 		swaybg_log(LOG_DEBUG, "Added listener for %d", output->wl_name);
@@ -223,14 +224,14 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 	output->committed_scale = output->scale;
 }
 
-static void render_animated_frame(struct swaybg_output* output, struct animated_image* anim)
+static void render_animated_frame(struct swaybg_output* output, struct lbm_image *image)
 {
 	bool do_render = false;
 	if( &output->link == output->state->outputs.next ) {
 		// Let the first display drive the animation
 		// TODO: this only works if the same image is on all outputs
 		// Animation should be driven by one display, and such display should be configured with the image
-		do_render = cycle_palette(anim);
+		do_render = cycle_palette(image);
 	}
 
 	if(do_render) {
@@ -245,13 +246,12 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 			return;
 		}
 
-		const struct lbm_image *lbm_image = &anim->lbm_image;
-		struct pixel_list *lists = anim->pixels_for_cycle;
+		struct pixel_list *lists = image->range_pixels;
 
 		uint32_t *dest_buf = output->buffer.data;
 		int32_t dmg_maxx = 0, dmg_maxy = 0, dmg_minx = INT_MAX, dmg_miny = INT_MAX;
 		static const int image_scale = 2; // TODO: get from config
-		for(int i = 0; i < lbm_image->n_ranges; i++) {
+		for(unsigned int i = 0; i < image->n_ranges; i++) {
 			const struct pixel_list range_pixels = lists[i];
 			if( !range_pixels.damaged ) {
 				continue;
@@ -262,11 +262,11 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 			for(unsigned int list_idx = 0; list_idx < range_pixels.n_pixels; list_idx++ )
 			{
 				const uint32_t pixel_idx = range_pixels.pixels[list_idx];
-				const unsigned char pixel = lbm_image->pixels[pixel_idx];
-				const uint32_t newcolor = *(uint32_t*)&lbm_image->palette[pixel];
+				const unsigned char pixel = image->pixels[pixel_idx];
+				const uint32_t newcolor = *(uint32_t*)&image->palette[pixel];
 
-				const unsigned int src_row = pixel_idx / lbm_image->width;
-				const unsigned int src_col = pixel_idx % lbm_image->width;
+				const unsigned int src_row = pixel_idx / image->width;
+				const unsigned int src_col = pixel_idx % image->width;
 				const unsigned int dst_pixel_stride = output->width * output->scale;
 
 				// Draw each pixel from the source image scale^2 times
@@ -282,16 +282,16 @@ static void render_animated_frame(struct swaybg_output* output, struct animated_
 					dest_buf[dst_idx+2] = newcolor;
 				}
 			}
-			if(range_pixels.max_x > dmg_maxx) {
+			if(range_pixels.max_x > (unsigned int)dmg_maxx) {
 				dmg_maxx = range_pixels.max_x;
 			}
-			if(range_pixels.max_y > dmg_maxy) {
+			if(range_pixels.max_y > (unsigned int)dmg_maxy) {
 				dmg_maxy = range_pixels.max_y;
 			}
-			if(range_pixels.min_x < dmg_minx) {
+			if(range_pixels.min_x < (unsigned int)dmg_minx) {
 				dmg_minx = range_pixels.min_x;
 			}
-			if(range_pixels.min_y < dmg_miny) {
+			if(range_pixels.min_y < (unsigned int)dmg_miny) {
 				dmg_miny = range_pixels.min_y;
 			}
 		}
@@ -772,7 +772,7 @@ int main(int argc, char **argv) {
 			cairo_surface_t *surface = load_background_image(image->path);
 
 			if (!surface) {
-				image->anim = load_animated_background_image(image->path);
+				image->anim = read_lbm_image(image->path);
 			}
 			if (!surface && !image->anim) {
 				swaybg_log(LOG_ERROR, "Failed to load image: %s", image->path);
