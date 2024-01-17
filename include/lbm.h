@@ -8,7 +8,6 @@ struct color_range {
     int low;
     int high;
     int rate;
-    struct color_range *next;
 };
 
 // ARGB8888 in native byte order
@@ -19,14 +18,10 @@ struct lbm_image {
     unsigned int width;
     unsigned int height;
     color_register palette[256];
-    // TODO: array instead of list?
-    struct color_range *range;
+    struct color_range *ranges;
     unsigned int n_ranges;
     uint8_t *pixels;
 
-    // Array of the animation state of each range.
-    // TODO: move to struct pixel_list?
-    uint16_t *cycle_idxs;
     // Look up table for the pixels in a given range
     struct pixel_list *range_pixels;
 };
@@ -41,7 +36,9 @@ struct pixel_list {
     unsigned int min_y;
     unsigned int max_x;
     unsigned int max_y;
-    // If this range was affected by a call to cycle_palette.
+    // Progress through current step in the cycle
+    uint16_t cycle_idx;
+    // True if this range was affected by a call to cycle_palette.
     // Users should clear this after reading the updated values.
     bool damaged;
 };

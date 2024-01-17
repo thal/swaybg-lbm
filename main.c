@@ -334,7 +334,7 @@ static void destroy_swaybg_image(struct swaybg_image *image) {
 	}
 	wl_list_remove(&image->link);
 	if (image->anim) {
-		free(image->anim);
+		free_lbm_image(image->anim);
 	}
 	free(image);
 }
@@ -358,6 +358,9 @@ static void destroy_swaybg_output(struct swaybg_output *output) {
 	}
 	if (output->surface != NULL) {
 		wl_surface_destroy(output->surface);
+	}
+	if (output->native_buffer != NULL) {
+		free(output->native_buffer);
 	}
 	destroy_buffer(&output->buffer);
 	wl_output_destroy(output->wl_output);

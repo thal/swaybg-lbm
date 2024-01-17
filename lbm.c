@@ -8,13 +8,7 @@
 #include "iff.h"
 #include "lbm.h"
 
-// TODO: make this part of load_lbm_image
-void do_additional_loading(struct lbm_image *image) {
-	image->cycle_idxs = calloc(image->n_ranges, sizeof(image->cycle_idxs[0]));
-	if( image->cycle_idxs == NULL ) {
-		goto error;
-	}
-
+static void prepare_pixel_lists(struct lbm_image *image) {
 	// For each range, track the pixels that are affected
 	image->range_pixels = calloc(image->n_ranges, sizeof(struct pixel_list));
 
@@ -24,8 +18,8 @@ void do_additional_loading(struct lbm_image *image) {
 	// fill pixel lists with offset
 	// while we're at it, store the bounding box of the pixels in this range
 
-	int i = 0;
-	for(struct color_range* range = image->range; range != NULL; range=range->next) {
+	for(unsigned int i = 0; i < image->n_ranges; i++) {
+		struct color_range *range = &image->ranges[i];
 		unsigned int pixels_in_range = 0;
 		for(unsigned int row = 0; row < image->height; row++) {
 			for(unsigned int col = 0; col < image->width; col++) {
@@ -68,7 +62,6 @@ void do_additional_loading(struct lbm_image *image) {
 		assert(range_idx == pixels_in_range);
 		printf("%s Range %d: %ld pixels, {%04d,%04d} to {%04d,%04d}",
 				__FUNCTION__, i, this_range->n_pixels, this_range->min_x, this_range->min_y, this_range->max_x, this_range->max_y);
-		i++;
 	}
 #if 0
 	swaybg_log(LOG_DEBUG, "Loaded LBM image with %d ranges:\n", ret->lbm_image.n_ranges);
@@ -93,9 +86,6 @@ void do_additional_loading(struct lbm_image *image) {
 	swaybg_log(LOG_DEBUG, "%d/%d pixels shall cycle (%.3f%%)", pixcnt, pixtotal, ((float)pixcnt / pixtotal) *100);
 #endif
 	return;
-error:
-	free(image->cycle_idxs);
-	free(image);
 }
 
 static void unpack(uint8_t *dest, const int8_t *src, const size_t size, const int compression) {
@@ -124,13 +114,15 @@ static void unpack(uint8_t *dest, const int8_t *src, const size_t size, const in
 }
 
 void free_lbm_image(struct lbm_image *image) {
-	struct color_range *head = image->range;
-	while(head != NULL) {
-		struct color_range *next = head->next;
-		free(head);
-		head = next;
+	if(image) {
+		for(unsigned int i = 0; i < image->n_ranges; i++) {
+			free(image->range_pixels[i].pixels);
+		}
+		free(image->ranges);
+		free(image->range_pixels);
+		free(image->pixels);
+		free(image);
 	}
-	free(image);
 }
 struct lbm_image *read_lbm_image(const char *path) {
 	struct lbm_image *ret = NULL;
@@ -145,9 +137,23 @@ struct lbm_image *read_lbm_image(const char *path) {
 		struct ck_FORM *form = (struct ck_FORM*)c;
 		struct chunk *child = form->base.child;
 
-		struct color_range **tail = &ret->range;
 		void *body = NULL;
 		int compression = 0;
+
+		// loop through once to count the CRNGs
+		while(child != NULL) {
+			if(child->id == CRNG) {
+				if(((struct ck_CRNG*)child)->rate > 0) {
+					ret->n_ranges++;
+				}
+			}
+			child = child->next;
+		}
+
+		child = form->base.child;
+
+		ret->ranges = calloc(ret->n_ranges, sizeof(struct color_range));
+		unsigned int range_idx = 0;
 
 		while( child != NULL ) {
 			if(child->id == BMHD) {
@@ -169,15 +175,13 @@ struct lbm_image *read_lbm_image(const char *path) {
 					palette[i] = creg;
 				}
 			} else if(child->id == CRNG) {
-				ret->n_ranges++;
 				struct ck_CRNG *crng = (struct ck_CRNG*)child;
-				struct color_range *range = calloc(1, sizeof(struct color_range));
+				struct color_range *range = &ret->ranges[range_idx];
 				if(crng->rate > 0) {
 					range->low = crng->low;
 					range->high = crng->high;
 					range->rate = crng->rate;
-					*tail = range;
-					tail = &((*tail)->next);
+					range_idx++;
 				}
 			} else if(child->id == BODY) {
 				struct ck_BODY *body_chunk = (struct ck_BODY*)child;
@@ -187,11 +191,12 @@ struct lbm_image *read_lbm_image(const char *path) {
 		}
 
 		size_t n_pixels = ret->width * ret->height;
-		ret->pixels = calloc(n_pixels,  sizeof(uint8_t));
+		ret->pixels = calloc(n_pixels, sizeof(uint8_t));
 		unpack(ret->pixels, body, n_pixels, compression);
+		prepare_pixel_lists(ret);
 	}
-	do_additional_loading(ret);
 exit:
+	free_chunk(c);
 	return ret;
 }
 
@@ -204,12 +209,11 @@ bool cycle_palette( struct lbm_image *image )
 	static const uint16_t mod = 1 << 14;
 
 	bool ret = false;
-	int i = 0;
-	for(struct color_range* range = image->range;
-			range != NULL; range=range->next) {
+	for(unsigned int i = 0; i < image->n_ranges; i++) {
+		struct color_range *range = &image->ranges[i];
 		// Increment each color range by its rate mod 2^14. If it overflows, perform the cycle
-		uint16_t newidx = (image->cycle_idxs[i] + range->rate) % mod;
-		if(newidx < image->cycle_idxs[i]) {
+		uint16_t newidx = (image->range_pixels[i].cycle_idx + range->rate) % mod;
+		if(newidx < image->range_pixels[i].cycle_idx) {
 			color_register last = image->palette[range->high];
 			memmove( &image->palette[range->low+1],
 						&image->palette[range->low],
@@ -218,8 +222,7 @@ bool cycle_palette( struct lbm_image *image )
 			image->range_pixels[i].damaged = true;
 			ret = true;
 		}
-		image->cycle_idxs[i] = newidx;
-		i++;
+		image->range_pixels[i].cycle_idx = newidx;
 	}
 	return ret;
 }
