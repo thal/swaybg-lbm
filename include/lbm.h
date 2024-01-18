@@ -1,8 +1,8 @@
 #ifndef _LBM_H_
 #define _LBM_H_
-#include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 struct color_range {
     int low;
@@ -43,9 +43,10 @@ struct pixel_list {
     bool damaged;
 };
 
-struct lbm_image *read_lbm_image(const char* path);
+struct lbm_image *read_lbm_image(const char *path);
 void free_lbm_image(struct lbm_image *image);
 
 bool cycle_palette(struct lbm_image *anim);
-void render_lbm_image( void **buffer, struct lbm_image *image, unsigned int width, unsigned int height, int scale);
+void render_lbm_image(void **buffer, struct lbm_image *image, unsigned int width,
+                      unsigned int height, int scale);
 #endif

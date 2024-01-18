@@ -7,19 +7,11 @@
 struct chunk *read_iff_file(const char *path);
 void free_chunk(struct chunk *c);
 
-typedef enum{
-    FORM,
-    BMHD,
-    CMAP,
-    CRNG,
-    BODY,
-    UNKNOWN,
-    N_CHUNKS
-} chunk_id;
+typedef enum { FORM, BMHD, CMAP, CRNG, BODY, UNKNOWN, N_CHUNKS } chunk_id;
 
 struct chunk {
     chunk_id id;
-    size_t size; // useless?
+    size_t size;  // useless?
     struct chunk *child;
     struct chunk *next;
 };
@@ -46,7 +38,7 @@ struct ck_BMHD {
     int16_t pageHeight;
 };
 
-struct ck_CMAP_ColorRegister{
+struct ck_CMAP_ColorRegister {
     uint8_t r;
     uint8_t g;
     uint8_t b;
