@@ -184,9 +184,9 @@ exit:
 }
 
 // Advance the animation of the color ranges in the image.
-// This function should be called at rate of 60Hz for the rate of the animation to agree with the
-// specification. Return true if the contents of any pixels changed, and thus whether a new frame
-// needs to be drawn. This modifies the contents of struct lbm_image::palette
+// This function should be called at rate of 60Hz for the rate of the animation to agree with the specification.
+// Return true if the contents of any pixels changed, and thus whether a new frame needs to be drawn.
+// This modifies the contents of struct lbm_image::palette
 bool cycle_palette(struct lbm_image *image) {
     static const uint16_t mod = 1 << 14;
 
@@ -208,27 +208,27 @@ bool cycle_palette(struct lbm_image *image) {
     return ret;
 }
 
-// Render the image to a new buffer at a given (integer) scale factor.
-// The caller is responsible for freeing the buffer.
-void render_lbm_image(void **buffer, struct lbm_image *image, unsigned int dst_width,
-                      unsigned int dst_height, int scale) {
-    // Assumes 4 bytes per pixel, ARGB, little-endian
-    void *dst_buf = calloc(dst_width * dst_height, 4);
-    assert(dst_buf);
-
+// Render the image into a buffer at a given origin and (integer) scale factor.
+// The visible area of the buffer is defined by dst_width and dst_height
+// The resulting image after translating and scaling is clipped to the visible area of the buffer
+void render_lbm_image(void *buffer, struct lbm_image *image, unsigned int dst_width,
+                      unsigned int dst_height, int origin_x, int origin_y, int scale) {
     const int dst_stride = dst_width;
-    uint32_t *row_start = dst_buf;
-    for (unsigned int row = 0; row < dst_height; row++) {
-        if (row / scale >= image->height) break;
+    uint32_t *row_start = buffer + (origin_y * dst_stride * sizeof(uint32_t));
+    for (int row = origin_y; row < (int)dst_height; row++) {
+        if ((row-origin_y) / scale >= (int)image->height) break;
 
-        for (unsigned int col = 0; col < dst_width; col++) {
-            if (col / scale >= image->width) break;
+        if ( row >= 0 ) {
+            for (int col = origin_x; col < (int)dst_width; col++) {
+                if ((col-origin_x) / scale >= (int)image->width) break;
 
-            unsigned char pixel = image->pixels[((row / scale) * image->width) + col / scale];
-            uint32_t color = *(uint32_t *)(&image->palette[pixel]);
-            row_start[col] = color;
+                if( col >= 0 ) {
+                    unsigned char pixel = image->pixels[(((row-origin_y) / scale) * image->width) + (col-origin_x) / scale];
+                    uint32_t color = *(uint32_t *)(&image->palette[pixel]);
+                    row_start[col] = color;
+                }
+            }
         }
         row_start += dst_stride;
     }
-    *buffer = dst_buf;
 }

@@ -47,6 +47,6 @@ struct lbm_image *read_lbm_image(const char *path);
 void free_lbm_image(struct lbm_image *image);
 
 bool cycle_palette(struct lbm_image *anim);
-void render_lbm_image(void **buffer, struct lbm_image *image, unsigned int width,
-                      unsigned int height, int scale);
+void render_lbm_image(void *buffer, struct lbm_image *image, unsigned int width,
+                      unsigned int height, int origin_x, int origin_y, int scale);
 #endif
