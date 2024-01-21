@@ -12,6 +12,9 @@
 
 #include "iff.h"
 
+#define MIN(a,b) (((a)<(b))?(a):(b))
+#define MAX(a,b) (((a)>(b))?(a):(b))
+
 static void prepare_pixel_lists(struct lbm_image *image) {
     image->range_pixels = calloc(image->n_ranges, sizeof(struct pixel_list));
 
@@ -35,39 +38,31 @@ static void prepare_pixel_lists(struct lbm_image *image) {
             }
         }
         struct pixel_list *this_range = &image->range_pixels[i];
-        this_range->min_x = INT_MAX;
-        this_range->min_y = INT_MAX;
+        this_range->bbox.min_x = INT_MAX;
+        this_range->bbox.min_y = INT_MAX;
         this_range->n_pixels = pixels_in_range;
         this_range->pixels = calloc(pixels_in_range, sizeof(unsigned int));
 
         unsigned int range_idx = 0;
         unsigned int *pixels = this_range->pixels;
-        for (unsigned int row = 0; row < image->height; row++) {
-            for (unsigned int col = 0; col < image->width; col++) {
+        for (int row = 0; row < (int)image->height; row++) {
+            for (int col = 0; col < (int)image->width; col++) {
                 unsigned int p_index = row * image->width + col;
                 uint8_t p = image->pixels[p_index];
                 if (p >= range->low && p <= range->high) {
                     pixels[range_idx++] = p_index;
-                    if (row > this_range->max_y) {
-                        this_range->max_y = row;
-                    }
-                    if (row < this_range->min_y) {
-                        this_range->min_y = row;
-                    }
-                    if (col > this_range->max_x) {
-                        this_range->max_x = col;
-                    }
-                    if (col < this_range->min_x) {
-                        this_range->min_x = col;
-                    }
+                    this_range->bbox.min_x = MIN(this_range->bbox.min_x, col);
+                    this_range->bbox.min_y = MIN(this_range->bbox.min_y, row);
+                    this_range->bbox.max_x = MAX(this_range->bbox.max_x, col);
+                    this_range->bbox.max_y = MAX(this_range->bbox.max_y, row);
                 }
             }
         }
         assert(range_idx == pixels_in_range);
 #ifdef DEBUG_LBM
         printf("%s Range %d: %ld pixels, {%04d,%04d} to {%04d,%04d}", __FUNCTION__, i,
-               this_range->n_pixels, this_range->min_x, this_range->min_y, this_range->max_x,
-               this_range->max_y);
+               this_range->n_pixels, this_range->bbox.min_x, this_range->bbox.min_y, this_range->bbox.max_x,
+               this_range->bbox.max_y);
 #endif
     }
 }
@@ -230,5 +225,84 @@ void render_lbm_image(void *buffer, struct lbm_image *image, unsigned int dst_wi
             }
         }
         row_start += dst_stride;
+    }
+}
+
+// Update the pixels in a buffer that have been damaged as a result of cycle_palette.
+// Interpretation of the arguments is the same as render_lbm_image.
+// Extent of damage (in dest. buffer coordinates) is returned through the damage out parameter.
+// If no pixels were damaged, then damage->min_x is set to be greater than damage->max_x (and likewise for min_y, max_y)
+// This clears the damaged flag of any affected pixel ranges
+void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
+                  unsigned int dst_height, int origin_x, int origin_y,
+                  int scale, struct bounding_box *damage) {
+
+    damage->min_x = INT_MAX;
+    damage->min_y = INT_MAX;
+    damage->max_x = 0;
+    damage->max_y = 0;
+
+    const unsigned int dst_stride = dst_width;
+    uint32_t *dst_buf = buffer;
+
+    for (unsigned int i = 0; i < image->n_ranges; i++) {
+        const struct pixel_list *range_pixels = &image->range_pixels[i];
+        if (!range_pixels->damaged) {
+            continue;
+        } else {
+            image->range_pixels[i].damaged = false;
+        }
+
+        for (unsigned int list_idx = 0; list_idx < range_pixels->n_pixels; list_idx++) {
+            const uint32_t pixel_idx = range_pixels->pixels[list_idx];
+            const unsigned char pixel = image->pixels[pixel_idx];
+            const uint32_t newcolor = *(uint32_t *)&image->palette[pixel];
+
+            const unsigned int src_row = pixel_idx / image->width;
+            const unsigned int src_col = pixel_idx % image->width;
+
+            // Draw each pixel from the source image scale^2 times
+            for (int square_y = 0; square_y < scale; square_y++) {
+                unsigned int dst_idx =
+                    (((src_row * scale) + (square_y + origin_y)) * dst_stride) +
+                    ((src_col * scale) + origin_x);
+
+                // TODO: profile and see if there is any point unrolling this
+                dst_buf[dst_idx] = newcolor;
+                if (scale < 2) continue;
+                dst_buf[dst_idx + 1] = newcolor;
+                if (scale < 3) continue;
+                dst_buf[dst_idx + 2] = newcolor;
+                if (scale < 4) continue;
+                dst_buf[dst_idx + 3] = newcolor;
+            }
+        }
+        damage->max_x = MAX(damage->max_x, range_pixels->bbox.max_x);
+        damage->max_y = MAX(damage->max_y, range_pixels->bbox.max_y);
+        damage->min_x = MIN(damage->min_x, range_pixels->bbox.min_x);
+        damage->min_y = MIN(damage->min_y, range_pixels->bbox.min_y);
+    }
+
+    // Damage bounding box is in source image coordinates. Transform it once at the end
+    if (damage->min_y != INT_MAX) {
+        damage->max_x *= scale;
+        damage->max_y *= scale;
+        damage->min_x *= scale;
+        damage->min_y *= scale;
+
+        damage->max_x += origin_x;
+        damage->max_y += origin_y;
+        damage->min_x += origin_x;
+        damage->min_y += origin_y;
+
+        // Account for the fact that dest. pixels are `scale` pixels wide and tall
+        damage->max_x += scale;
+        damage->max_y += scale;
+
+        // Clip the result to the size of the destination
+        damage->max_x = MIN(damage->max_x, (int)dst_width);
+        damage->max_y = MIN(damage->max_y, (int)dst_height);
+        damage->min_x = MAX(damage->min_x, 0);
+        damage->min_y = MAX(damage->min_y, 0);
     }
 }

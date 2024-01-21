@@ -318,7 +318,7 @@ exit:
 #ifdef STANDALONE
 int main(int argc, const char **argv) {
     if (argc > 1) {
-        struct chunk *c = read_file(argv[1]);
+        struct chunk *c = read_iff_file(argv[1]);
         if (c) {
             free_chunk(c);
         }

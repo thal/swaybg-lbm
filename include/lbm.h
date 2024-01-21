@@ -26,16 +26,20 @@ struct lbm_image {
     struct pixel_list *range_pixels;
 };
 
+struct bounding_box {
+    int min_x;
+    int min_y;
+    int max_x;
+    int max_y;
+};
+
 struct pixel_list {
     // Number of pixels in this range
     size_t n_pixels;
     // A list of indices into the image data buffer in bytes
     unsigned int *pixels;
     // Bounding box of pixel range
-    unsigned int min_x;
-    unsigned int min_y;
-    unsigned int max_x;
-    unsigned int max_y;
+    struct bounding_box bbox;
     // Progress through current step in the cycle
     uint16_t cycle_idx;
     // True if this range was affected by a call to cycle_palette.
@@ -49,4 +53,6 @@ void free_lbm_image(struct lbm_image *image);
 bool cycle_palette(struct lbm_image *anim);
 void render_lbm_image(void *buffer, struct lbm_image *image, unsigned int width,
                       unsigned int height, int origin_x, int origin_y, int scale);
+void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
+                  unsigned int dst_height, int origin_x, int origin_y, int scale, struct bounding_box *damage);
 #endif

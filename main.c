@@ -17,6 +17,12 @@
 #include "single-pixel-buffer-v1-client-protocol.h"
 #include "lbm.h"
 
+// Some values to test scaling and offsets.
+// TODO: Derive these from output config
+static const int origin_x = 0;
+static const int origin_y = -60;
+static const int image_scale = 3;
+
 /*
  * If `color` is a hexadecimal string of the form 'rrggbb' or '#rrggbb',
  * `*result` will be set to the uint32_t version of the color. Otherwise,
@@ -135,8 +141,7 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 	// If the last committed buffer has the same size as this one would, do
 	// not render a new buffer, because it will be identical to the old one
-	if (!output->config->image->anim &&
-			output->committed_width == buffer_width &&
+	if (output->committed_width == buffer_width &&
 			output->committed_height == buffer_height) {
 		if (output->committed_scale != output->scale) {
 			wl_surface_set_buffer_scale(output->surface, output->scale);
@@ -205,7 +210,14 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 
 	if(output->config->image->anim) {
-		render_lbm_image(&output->native_buffer, output->config->image->anim, buffer_width, buffer_height, 2);
+		// TODO: need to make sure this isnt called more than necessary, ie, if the size of the buffer hasnt changed
+		swaybg_log(LOG_INFO, "allocating new native buffer!");
+		if(output->native_buffer) {
+			free(output->native_buffer);
+		}
+		output->native_buffer = calloc(1, buffer_width*buffer_height*4);
+
+		render_lbm_image(output->native_buffer, output->config->image->anim, buffer_width, buffer_height, origin_x, origin_y, image_scale);
 		struct wl_callback *cb = wl_surface_frame(output->surface);
 		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
 		swaybg_log(LOG_DEBUG, "Added listener for %d", output->wl_name);
@@ -246,64 +258,16 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 			return;
 		}
 
-		struct pixel_list *lists = image->range_pixels;
-
-		uint32_t *dest_buf = output->buffer.data;
-		int32_t dmg_maxx = 0, dmg_maxy = 0, dmg_minx = INT_MAX, dmg_miny = INT_MAX;
-		static const int image_scale = 2; // TODO: get from config
-		for(unsigned int i = 0; i < image->n_ranges; i++) {
-			const struct pixel_list range_pixels = lists[i];
-			if( !range_pixels.damaged ) {
-				continue;
-			} else {
-				lists[i].damaged = false;
-			}
-
-			for(unsigned int list_idx = 0; list_idx < range_pixels.n_pixels; list_idx++ )
-			{
-				const uint32_t pixel_idx = range_pixels.pixels[list_idx];
-				const unsigned char pixel = image->pixels[pixel_idx];
-				const uint32_t newcolor = *(uint32_t*)&image->palette[pixel];
-
-				const unsigned int src_row = pixel_idx / image->width;
-				const unsigned int src_col = pixel_idx % image->width;
-				const unsigned int dst_pixel_stride = output->width * output->scale;
-
-				// Draw each pixel from the source image scale^2 times
-				for(int square_y = 0; square_y < image_scale; square_y++) {
-					//unsigned int dst_idx = (((src_row *image_scale) + square_y) * dst_pixel_stride) + (((src_col * image_scale)+square_x) );
-					unsigned int dst_idx = (((src_row *image_scale) + square_y) * dst_pixel_stride) + ((src_col * image_scale) );
-
-					// Need to profile and see if there's actually any point in unrolling this loop
-					dest_buf[dst_idx] = newcolor;
-					if(image_scale < 2) continue;
-					dest_buf[dst_idx+1] = newcolor;
-					if(image_scale < 3) continue;
-					dest_buf[dst_idx+2] = newcolor;
-				}
-			}
-			if(range_pixels.max_x > (unsigned int)dmg_maxx) {
-				dmg_maxx = range_pixels.max_x;
-			}
-			if(range_pixels.max_y > (unsigned int)dmg_maxy) {
-				dmg_maxy = range_pixels.max_y;
-			}
-			if(range_pixels.min_x < (unsigned int)dmg_minx) {
-				dmg_minx = range_pixels.min_x;
-			}
-			if(range_pixels.min_y < (unsigned int)dmg_miny) {
-				dmg_miny = range_pixels.min_y;
-			}
-		}
+		struct bounding_box damage;
+		render_delta(output->buffer.data, image, output->width * output->scale, output->height * output->scale, origin_x,origin_y, image_scale, &damage);
 		swaybg_log(LOG_DEBUG, "attaching buffer %p", output->buffer.buffer);
 		wl_surface_set_buffer_scale(output->surface, output->scale);
 		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
-		// TODO: This needs to not assume the origin of the image is displayed at 0,0
 		wl_surface_damage_buffer(output->surface,
-				dmg_minx*image_scale,
-				dmg_miny*image_scale,
-				(dmg_maxx-dmg_minx+1)*image_scale,
-				(dmg_maxy-dmg_miny+1)*image_scale);
+				damage.min_x,
+				damage.min_y,
+				damage.max_x - damage.min_x,
+				damage.max_y - damage.min_y);
 		output->buffer.available = false;
 	}
 
@@ -375,11 +339,13 @@ static void layer_surface_configure(void *data,
 	struct swaybg_output *output = data;
 	output->width = width;
 	output->height = height;
-	output->dirty = true;
 	output->configure_serial = serial;
 	output->needs_ack = true;
-	swaybg_log(LOG_DEBUG, "Dirtying output %s because of configure{%p,%d,%d,%d}. Output surface needs ack",
+	if( output->committed_width != (int32_t)width || output->committed_height != (int32_t)height ) {
+		swaybg_log(LOG_DEBUG, "Dirtying output %s because of configure{%p,%d,%d,%d}. Output surface needs ack",
 				output->name, surface, width, height, serial);
+		output->dirty = true;
+	}
 }
 
 static void layer_surface_closed(void *data,
