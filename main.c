@@ -17,12 +17,6 @@
 #include "single-pixel-buffer-v1-client-protocol.h"
 #include "lbm.h"
 
-// Some values to test scaling and offsets.
-// TODO: Derive these from output config
-static const int origin_x = 0;
-static const int origin_y = -60;
-static const int image_scale = 3;
-
 /*
  * If `color` is a hexadecimal string of the form 'rrggbb' or '#rrggbb',
  * `*result` will be set to the uint32_t version of the color. Otherwise,
@@ -68,6 +62,9 @@ struct swaybg_output_config {
 	struct swaybg_image *image;
 	enum background_mode mode;
 	uint32_t color;
+	int lbm_origin_x;
+	int lbm_origin_y;
+	unsigned int lbm_scale;
 	struct wl_list link;
 };
 
@@ -134,6 +131,41 @@ const struct wl_buffer_listener buffer_listener = {
 
 static const struct wl_callback_listener wl_surface_frame_listener;
 
+
+void set_lbm_geometry_for_config( struct swaybg_output_config *config, int dst_width, int dst_height) {
+	config->lbm_scale = 1;
+	config->lbm_origin_y = 0;
+	config->lbm_origin_x = 0;
+	const struct lbm_image *image = config->image->anim;
+	if( !image ) {
+		return;
+	}
+	// Scale the image up until it matches the configured display mode
+	while(1) {
+		int image_width = image->width * config->lbm_scale;
+		int image_height = image->height * config->lbm_scale;
+		config->lbm_origin_x = (dst_width - image_width) / 2;
+		config->lbm_origin_y = (dst_height - image_height) / 2;
+
+		swaybg_log(LOG_DEBUG, "%s trying %d,%d at %dx\n", __FUNCTION__, config->lbm_origin_x, config->lbm_origin_y, config->lbm_scale);
+
+		// Allow a small margin in case it *almost* fits at a certain scale
+		// TODO: allow providing this margin on the command line
+		const int margin = 100;
+		if ( config->mode == BACKGROUND_MODE_CENTER ) {
+			break;
+		} else if ( config->mode == BACKGROUND_MODE_FIT ) {
+			if ( config->lbm_origin_x <= margin || config->lbm_origin_y <= margin ) {
+				break;
+			}
+		} else if( config->mode == BACKGROUND_MODE_FILL ) {
+			if ( config->lbm_origin_x <= margin && config->lbm_origin_y <= margin ) {
+				break;
+			}
+		}
+		config->lbm_scale++;
+	}
+}
 
 static void render_frame(struct swaybg_output *output, cairo_surface_t *surface) {
 	int buffer_width = output->width * output->scale,
@@ -217,7 +249,9 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		}
 		output->native_buffer = calloc(1, buffer_width*buffer_height*4);
 
-		render_lbm_image(output->native_buffer, output->config->image->anim, buffer_width, buffer_height, origin_x, origin_y, image_scale);
+		set_lbm_geometry_for_config(output->config, buffer_width, buffer_height);
+
+		render_lbm_image(output->native_buffer, output->config->image->anim, buffer_width, buffer_height, output->config->lbm_origin_x, output->config->lbm_origin_y, output->config->lbm_scale);
 		struct wl_callback *cb = wl_surface_frame(output->surface);
 		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
 		swaybg_log(LOG_DEBUG, "Added listener for %d", output->wl_name);
@@ -259,7 +293,7 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 		}
 
 		struct bounding_box damage;
-		render_delta(output->buffer.data, image, output->width * output->scale, output->height * output->scale, origin_x,origin_y, image_scale, &damage);
+		render_delta(output->buffer.data, image, output->width * output->scale, output->height * output->scale, output->config->lbm_origin_x, output->config->lbm_origin_y, output->config->lbm_scale, &damage);
 		swaybg_log(LOG_DEBUG, "attaching buffer %p", output->buffer.buffer);
 		wl_surface_set_buffer_scale(output->surface, output->scale);
 		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
@@ -753,7 +787,15 @@ int main(int argc, char **argv) {
 			}
 
 			wl_list_for_each(output, &state.outputs, link) {
-				if (output->dirty && output->config->image == image) {
+				struct swaybg_image *image = output->config->image;
+				if ( image->anim && (output->config->mode != BACKGROUND_MODE_FIT ) &&
+						(output->config->mode != BACKGROUND_MODE_FILL) &&
+						(output->config->mode != BACKGROUND_MODE_CENTER)) {
+					// TODO: tiling should be supported too
+					swaybg_log(LOG_ERROR, "Only modes \"fit\", \"fill\" and \"center\" are supported for LBM images");
+					free_lbm_image(image->anim);
+					image->anim = NULL;
+				} else if (output->dirty && output->config->image == image) {
 
 					output->dirty = false;
 					render_frame(output, surface);
