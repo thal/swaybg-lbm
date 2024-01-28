@@ -272,6 +272,10 @@ void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
                     (((src_row * scale) + (square_y + origin_y)) * dst_stride) +
                     ((src_col * scale) + origin_x);
 
+                if (dst_idx >= dst_width * dst_height) {
+                    continue;
+                }
+
                 // TODO: profile and see if there is any point unrolling this
                 dst_buf[dst_idx] = newcolor;
                 if (scale < 2) continue;
