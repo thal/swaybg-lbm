@@ -24,6 +24,9 @@ struct lbm_image {
 
     // Look up table for the pixels in a given range
     struct pixel_list *range_pixels;
+
+    unsigned long frame_count;
+    void *userdata;
 };
 
 struct bounding_box {
@@ -54,5 +57,5 @@ bool cycle_palette(struct lbm_image *anim);
 void render_lbm_image(void *buffer, struct lbm_image *image, unsigned int width,
                       unsigned int height, int origin_x, int origin_y, int scale);
 void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
-                  unsigned int dst_height, int origin_x, int origin_y, int scale, struct bounding_box *damage);
+                  unsigned int dst_height, int origin_x, int origin_y, int scale, struct bounding_box *damage, bool clear);
 #endif

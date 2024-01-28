@@ -200,6 +200,9 @@ bool cycle_palette(struct lbm_image *image) {
         }
         image->range_pixels[i].cycle_idx = newidx;
     }
+    if (ret) {
+        image->frame_count++;
+    }
     return ret;
 }
 
@@ -235,7 +238,7 @@ void render_lbm_image(void *buffer, struct lbm_image *image, unsigned int dst_wi
 // This clears the damaged flag of any affected pixel ranges
 void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
                   unsigned int dst_height, int origin_x, int origin_y,
-                  int scale, struct bounding_box *damage) {
+                  int scale, struct bounding_box *damage, bool clear) {
 
     damage->min_x = INT_MAX;
     damage->min_y = INT_MAX;
@@ -247,10 +250,12 @@ void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
 
     for (unsigned int i = 0; i < image->n_ranges; i++) {
         const struct pixel_list *range_pixels = &image->range_pixels[i];
-        if (!range_pixels->damaged) {
-            continue;
-        } else {
-            image->range_pixels[i].damaged = false;
+        if (clear) {
+            if (!range_pixels->damaged) {
+                continue;
+            } else {
+                image->range_pixels[i].damaged = false;
+            }
         }
 
         for (unsigned int list_idx = 0; list_idx < range_pixels->n_pixels; list_idx++) {

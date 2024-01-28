@@ -62,9 +62,6 @@ struct swaybg_output_config {
 	struct swaybg_image *image;
 	enum background_mode mode;
 	uint32_t color;
-	int lbm_origin_x;
-	int lbm_origin_y;
-	unsigned int lbm_scale;
 	struct wl_list link;
 };
 
@@ -87,10 +84,13 @@ struct swaybg_output {
 	bool dirty, needs_ack;
 	int32_t committed_width, committed_height, committed_scale;
 	uint32_t last_frame_time;
-	uint32_t frame_count;
+	uint64_t frame_count;
 
 	struct pool_buffer buffer;
 	void *native_buffer;
+	int lbm_origin_x;
+	int lbm_origin_y;
+	unsigned int lbm_scale;
 	struct wl_list link;
 };
 
@@ -132,38 +132,38 @@ const struct wl_buffer_listener buffer_listener = {
 static const struct wl_callback_listener wl_surface_frame_listener;
 
 
-void set_lbm_geometry_for_config( struct swaybg_output_config *config, int dst_width, int dst_height) {
-	config->lbm_scale = 1;
-	config->lbm_origin_y = 0;
-	config->lbm_origin_x = 0;
-	const struct lbm_image *image = config->image->anim;
+void set_lbm_geometry_for_output( struct swaybg_output *output, int dst_width, int dst_height) {
+	output->lbm_scale = 1;
+	output->lbm_origin_y = 0;
+	output->lbm_origin_x = 0;
+	const struct lbm_image *image = output->config->image->anim;
 	if( !image ) {
 		return;
 	}
 	// Scale the image up until it matches the configured display mode
 	while(1) {
-		int image_width = image->width * config->lbm_scale;
-		int image_height = image->height * config->lbm_scale;
-		config->lbm_origin_x = (dst_width - image_width) / 2;
-		config->lbm_origin_y = (dst_height - image_height) / 2;
+		int image_width = image->width * output->lbm_scale;
+		int image_height = image->height * output->lbm_scale;
+		output->lbm_origin_x = (dst_width - image_width) / 2;
+		output->lbm_origin_y = (dst_height - image_height) / 2;
 
-		swaybg_log(LOG_DEBUG, "%s trying %d,%d at %dx\n", __FUNCTION__, config->lbm_origin_x, config->lbm_origin_y, config->lbm_scale);
+		swaybg_log(LOG_DEBUG, "%s trying %d,%d at %dx\n", __FUNCTION__, output->lbm_origin_x, output->lbm_origin_y, output->lbm_scale);
 
 		// Allow a small margin in case it *almost* fits at a certain scale
 		// TODO: allow providing this margin on the command line
 		const int margin = 100;
-		if ( config->mode == BACKGROUND_MODE_CENTER ) {
+		if ( output->config->mode == BACKGROUND_MODE_CENTER ) {
 			break;
-		} else if ( config->mode == BACKGROUND_MODE_FIT ) {
-			if ( config->lbm_origin_x <= margin || config->lbm_origin_y <= margin ) {
+		} else if ( output->config->mode == BACKGROUND_MODE_FIT ) {
+			if ( output->lbm_origin_x <= margin || output->lbm_origin_y <= margin ) {
 				break;
 			}
-		} else if( config->mode == BACKGROUND_MODE_FILL ) {
-			if ( config->lbm_origin_x <= margin && config->lbm_origin_y <= margin ) {
+		} else if( output->config->mode == BACKGROUND_MODE_FILL ) {
+			if ( output->lbm_origin_x <= margin && output->lbm_origin_y <= margin ) {
 				break;
 			}
 		}
-		config->lbm_scale++;
+		output->lbm_scale++;
 	}
 }
 
@@ -249,9 +249,9 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		}
 		output->native_buffer = calloc(1, buffer_width*buffer_height*4);
 
-		set_lbm_geometry_for_config(output->config, buffer_width, buffer_height);
+		set_lbm_geometry_for_output(output, buffer_width, buffer_height);
 
-		render_lbm_image(output->native_buffer, output->config->image->anim, buffer_width, buffer_height, output->config->lbm_origin_x, output->config->lbm_origin_y, output->config->lbm_scale);
+		render_lbm_image(output->native_buffer, output->config->image->anim, buffer_width, buffer_height, output->lbm_origin_x, output->lbm_origin_y, output->lbm_scale);
 		struct wl_callback *cb = wl_surface_frame(output->surface);
 		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
 		swaybg_log(LOG_DEBUG, "Added listener for %d", output->wl_name);
@@ -270,15 +270,28 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 	output->committed_scale = output->scale;
 }
 
+// TODO: Update the driver only when the connected outputs change. Dont need to do this every frame.
+struct swaybg_output *get_driver_for_image( const struct swaybg_state *state, const struct lbm_image *image ) {
+	struct swaybg_output *output;
+	wl_list_for_each(output, &state->outputs, link) {
+		if( output == image->userdata ) {
+			return output;
+		}
+	}
+	return NULL;
+}
+
 static void render_animated_frame(struct swaybg_output* output, struct lbm_image *image)
 {
 	bool do_render = false;
-	if( &output->link == output->state->outputs.next ) {
-		// Let the first display drive the animation
-		// TODO: this only works if the same image is on all outputs
-		// Animation should be driven by one display, and such display should be configured with the image
+	bool is_driver = (output == get_driver_for_image(output->state, image));
+
+	// Only one output drives the animation
+	if( is_driver ) {
 		do_render = cycle_palette(image);
 	}
+
+	do_render = image->frame_count > output->frame_count;
 
 	if(do_render) {
 		bool buffer_size_changed = false; // TODO: check if size has changed
@@ -293,7 +306,7 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 		}
 
 		struct bounding_box damage;
-		render_delta(output->buffer.data, image, output->width * output->scale, output->height * output->scale, output->config->lbm_origin_x, output->config->lbm_origin_y, output->config->lbm_scale, &damage);
+		render_delta(output->buffer.data, image, output->width * output->scale, output->height * output->scale, output->lbm_origin_x, output->lbm_origin_y, output->lbm_scale, &damage, is_driver);
 		swaybg_log(LOG_DEBUG, "attaching buffer %p", output->buffer.buffer);
 		wl_surface_set_buffer_scale(output->surface, output->scale);
 		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
@@ -303,6 +316,7 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 				damage.max_x - damage.min_x,
 				damage.max_y - damage.min_y);
 		output->buffer.available = false;
+		output->frame_count = image->frame_count;
 	}
 
 	struct wl_callback *cb = wl_surface_frame(output->surface);
@@ -797,6 +811,9 @@ int main(int argc, char **argv) {
 					image->anim = NULL;
 				} else if (output->dirty && output->config->image == image) {
 
+					if ( image->anim ) {
+						image->anim->userdata = output;
+					}
 					output->dirty = false;
 					render_frame(output, surface);
 				}
