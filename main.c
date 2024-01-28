@@ -242,8 +242,6 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 
 
 	if(output->config->image->anim) {
-		// TODO: need to make sure this isnt called more than necessary, ie, if the size of the buffer hasnt changed
-		swaybg_log(LOG_INFO, "allocating new native buffer!");
 		if(output->native_buffer) {
 			free(output->native_buffer);
 		}
@@ -786,18 +784,14 @@ int main(int argc, char **argv) {
 				continue;
 			}
 
-			cairo_surface_t *surface = load_background_image(image->path);
-
-			if (!surface) {
-				image->anim = read_lbm_image(image->path);
-			}
-			if (!surface && !image->anim) {
-				swaybg_log(LOG_ERROR, "Failed to load image: %s", image->path);
-				continue;
-			}
-			else
-			{
-				swaybg_log(LOG_INFO, "Loaded LBM image: %s", image->path);
+			cairo_surface_t *surface = NULL;
+			image->anim = read_lbm_image(image->path);
+			if (!image->anim) {
+				surface = load_background_image(image->path);
+				if (!surface) {
+					swaybg_log(LOG_ERROR, "Failed to load image: %s", image->path);
+					continue;
+				}
 			}
 
 			wl_list_for_each(output, &state.outputs, link) {
