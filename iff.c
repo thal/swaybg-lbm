@@ -222,9 +222,7 @@ struct chunk *parse_FORM(const void *data, size_t size) {
     printf("FormType: %.4s\n", ck->formType);
 #endif
 
-    while (
-        size >
-        1) {  // Acount for odd number of bytes, in which case there is a 0 padding byte at the end
+    while (size > 1) {  // Acount for odd number of bytes, in which case there is a 0 padding byte at the end
         struct chunk *next = parse(data, size);
         size -= next->size + HDR_SIZE;
         data += next->size + HDR_SIZE;

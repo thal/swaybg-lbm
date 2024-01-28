@@ -106,7 +106,7 @@ struct lbm_image *read_lbm_image(const char *path) {
     struct lbm_image *ret = NULL;
     struct chunk *c = read_iff_file(path);
 
-    if (!c) {
+    if (!c || c->id != FORM ) {
         goto exit;
     }
 
