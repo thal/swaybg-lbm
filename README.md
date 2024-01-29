@@ -1,43 +1,27 @@
-# swaybg
+# swaybg-lbm
 
-swaybg is a wallpaper utility for Wayland compositors. It is compatible with
-any Wayland compositor which implements the wlr-layer-shell protocol and
-`wl_output` version 4.
+A fork of [swaybg](https://github.com/swaywm/swaybg) with support for color-cycling LBM images.
 
-See the man page, `swaybg(1)`, for instructions on using swaybg.
+Color-cycling refers to an animation technique in which the image pixels are static, but certain
+ranges of the color palette can shift and vary from one frame to the next.
 
-## Release Signatures
+This technique was widely used in old PC games to make the most of the limited 256-color palette.
+Recently, however, you're likely to have seen this technique on [Joseph Huckaby's web-based demo](http://www.effectgames.com/demos/canvascycle),
+or the [Living Worlds mobile app](http://pixfabrik.com/livingworlds). Both of these feature the beautiful pixel art landscapes created by [Mark Ferrari](https://www.markferrari.com/).
 
-Releases are signed with [E88F5E48](https://keys.openpgp.org/search?q=34FF9526CFEF0E97A340E2E40FDE7BE0E88F5E48)
-and published [on GitHub](https://github.com/swaywm/swaybg/releases). swaybg
-releases are managed independently of sway releases.
+This project allows you to use these scenes as a wallpaper on your Wayland desktop.
 
-## Installation
+The artwork featured in the links above is under copyright, so the image files are not included here.
 
-### From Packages
+## Using
 
-swaybg is available in many distributions. Try installing the "swaybg"
-package for yours.
+To diplay an animated LBM image, swaybg-lbm is invoked exactly the same way as swaybg with a few small differences:
+* Aspect ratio of the source image is always preserved, and only integer scaling is supported. Therefore, the "Stretch" mode is not supported.
+* "Fill" and "Fit" will scale the image up accordingly, but with a margin of up to 100px. In other words, a lower scale factor is preferred, if the image very nearly fits.
 
-If you're interested in packaging swaybg for your distribution, stop by the
-IRC channel or shoot an email to sir@cmpwn.com for advice.
+## TODOs
+- [ ] GPU rendering
+- [ ] Smooth cycling
+- [ ] Time-of-day-based palette shifting
 
-### Compiling from Source
-
-Install dependencies:
-
-* meson \*
-* wayland
-* wayland-protocols \*
-* cairo
-* gdk-pixbuf2 (optional: image formats other than PNG)
-* [scdoc](https://git.sr.ht/~sircmpwn/scdoc) (optional: man pages) \*
-* git (optional: version information) \*
-
-_\* Compile-time dep_
-
-Run these commands:
-
-    meson build/
-    ninja -C build/
-    sudo ninja -C build/ install
+Refer to the upstream swaybg documentation for any general information regarding swaybg
