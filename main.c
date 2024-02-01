@@ -15,6 +15,7 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "single-pixel-buffer-v1-client-protocol.h"
+#include "fractional-scale-v1-client-protocol.h"
 #include "lbm.h"
 
 /*
@@ -49,6 +50,7 @@ struct swaybg_state {
 	struct zwlr_layer_shell_v1 *layer_shell;
 	struct wp_viewporter *viewporter;
 	struct wp_single_pixel_buffer_manager_v1 *single_pixel_buffer_manager;
+	struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
 	struct wl_list configs;  // struct swaybg_output_config::link
 	struct wl_list outputs;  // struct swaybg_output::link
 	struct wl_list images;   // struct swaybg_image::link
@@ -78,7 +80,10 @@ struct swaybg_output {
 	struct zwlr_layer_surface_v1 *layer_surface;
 
 	uint32_t width, height;
+	// TODO: consolidate these.
+	// Changing scale to mean 1/120ths will require dividing by 120 everywhere scale is used
 	int32_t scale;
+	uint32_t scale_hundredtwentieths;
 
 	uint32_t configure_serial;
 	bool dirty, needs_ack;
@@ -91,6 +96,8 @@ struct swaybg_output {
 	int lbm_origin_x;
 	int lbm_origin_y;
 	unsigned int lbm_scale;
+	struct wp_fractional_scale_v1 *fractional_scale;
+	struct wp_viewport *viewport;
 	struct wl_list link;
 };
 
@@ -114,13 +121,13 @@ bool is_valid_color(const char *color) {
 
 void release_buffer(void *data, struct wl_buffer *buffer) {
 	struct swaybg_output *output = data;
-	swaybg_log(LOG_DEBUG, "%s %p",__FUNCTION__, buffer);
+	//swaybg_log(LOG_DEBUG, "%s %p",__FUNCTION__, buffer);
 	if( output->buffer.buffer == buffer ) { // If frame callback is not reallocating buffer, this is always the case
 		// Let the output reuse this buffer if it can
 		output->buffer.available = true;
-		swaybg_log(LOG_DEBUG, "%s Reusing %p",__FUNCTION__, buffer);
+		//swaybg_log(LOG_DEBUG, "%s Reusing %p",__FUNCTION__, buffer);
 	} else {
-		swaybg_log(LOG_DEBUG, "%s Destroying %p",__FUNCTION__, buffer);
+		//swaybg_log(LOG_DEBUG, "%s Destroying %p",__FUNCTION__, buffer);
 		destroy_buffer(&output->buffer);
 	}
 }
@@ -168,11 +175,24 @@ void set_lbm_geometry_for_output( struct swaybg_output *output, int dst_width, i
 }
 
 static void render_frame(struct swaybg_output *output, cairo_surface_t *surface) {
-	int buffer_width = output->width * output->scale,
-		buffer_height = output->height * output->scale;
+
+	int buffer_width = output->width, buffer_height = output->height;
+
+	if( output->scale_hundredtwentieths ) {
+		buffer_width *= output->scale_hundredtwentieths;
+		buffer_width /= 120;
+		buffer_height *= output->scale_hundredtwentieths;
+		buffer_height /= 120;
+	} else {
+		buffer_width *= output->scale;
+		buffer_height *= output->scale;
+	}
+
+	swaybg_log(LOG_DEBUG, "output %s using buffer of size %dx%d", output->name, buffer_width, buffer_height);
 
 	// If the last committed buffer has the same size as this one would, do
 	// not render a new buffer, because it will be identical to the old one
+	// TODO use surface local coordinates here
 	if (output->committed_width == buffer_width &&
 			output->committed_height == buffer_height) {
 		if (output->committed_scale != output->scale) {
@@ -183,6 +203,10 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		}
 		return;
 	}
+	swaybg_log(LOG_DEBUG, "%s committed size{%ix%i/%i}, buffer size{%ix%i/%i}", output->name,
+			output->committed_width, output->committed_height, output->committed_scale,
+			buffer_width, buffer_height, output->scale
+			);
 
 	if (output->config->mode == BACKGROUND_MODE_SOLID_COLOR &&
 			output->state->viewporter &&
@@ -201,23 +225,20 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		wl_surface_attach(output->surface, buffer, 0, 0);
 		wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
 
-		struct wp_viewport *viewport = wp_viewporter_get_viewport(
-			output->state->viewporter, output->surface);
-		wp_viewport_set_destination(viewport, output->width, output->height);
-
 		wl_surface_commit(output->surface);
 
-		wp_viewport_destroy(viewport);
 		wl_buffer_destroy(buffer);
 		return;
 	}
 
-	if(!output->buffer.buffer) {
-		//output->buffer = calloc(1, sizeof(struct pool_buffer));
-		if (!create_buffer(&output->buffer, output->state->shm,
-				buffer_width, buffer_height, WL_SHM_FORMAT_ARGB8888, output)) {
-			return;
+	if (output->committed_width != buffer_width ||
+			output->committed_height != buffer_height) {
+		if(output->buffer.buffer) {
+			destroy_buffer(&output->buffer);
 		}
+		if( !create_buffer(&output->buffer, output->state->shm,
+				buffer_width, buffer_height, WL_SHM_FORMAT_ARGB8888, output) )
+			return;
 	}
 
 	cairo_t *cairo = output->buffer.cairo;
@@ -253,14 +274,16 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		struct wl_callback *cb = wl_surface_frame(output->surface);
 		wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
 		swaybg_log(LOG_DEBUG, "Added listener for %d", output->wl_name);
-		const unsigned int surface_width = output->width * output->scale;
-		const unsigned int surface_height = output->height * output->scale;
-		memcpy( output->buffer.data, output->native_buffer, surface_width * surface_height * 4);
+		//const unsigned int surface_width = output->width * output->scale;
+		//const unsigned int surface_height = output->height * output->scale;
+		memcpy( output->buffer.data, output->native_buffer, buffer_width * buffer_height * 4);
 	}
 
 	wl_surface_set_buffer_scale(output->surface, output->scale);
 	wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
 	wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
+	wp_viewport_set_destination(output->viewport, output->width, output->height);
+
 	wl_surface_commit(output->surface);
 
 	output->committed_width = buffer_width;
@@ -304,10 +327,20 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 		}
 
 		struct bounding_box damage;
-		render_delta(output->buffer.data, image, output->width * output->scale, output->height * output->scale, output->lbm_origin_x, output->lbm_origin_y, output->lbm_scale, &damage, is_driver);
-		swaybg_log(LOG_DEBUG, "attaching buffer %p", output->buffer.buffer);
+		unsigned int buffer_width = output->width, buffer_height = output->height;
+		if( output->scale_hundredtwentieths ) {
+			buffer_width *= output->scale_hundredtwentieths;
+			buffer_width /= 120;
+			buffer_height *= output->scale_hundredtwentieths;
+			buffer_height /= 120;
+		} else {
+			buffer_width *= output->scale;
+			buffer_height *= output->scale;
+		}
+		render_delta(output->buffer.data, image, buffer_width, buffer_height, output->lbm_origin_x, output->lbm_origin_y, output->lbm_scale, &damage, is_driver);
 		wl_surface_set_buffer_scale(output->surface, output->scale);
 		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
+
 		wl_surface_damage_buffer(output->surface,
 				damage.min_x,
 				damage.min_y,
@@ -317,18 +350,18 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 		output->frame_count = image->frame_count;
 	}
 
+	wp_viewport_set_destination( output->viewport, output->width, output->height);
 	struct wl_callback *cb = wl_surface_frame(output->surface);
 	wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
 
 	wl_surface_commit(output->surface);
-
 }
 
 static void wl_surface_frame_done(void *data, struct wl_callback *cb, uint32_t time) {
 	wl_callback_destroy(cb);
 
 	struct swaybg_output *output = data;
-	swaybg_log(LOG_DEBUG, "%s %s %d", __FUNCTION__, output->name, time);
+	//swaybg_log(LOG_DEBUG, "%s %s %d", __FUNCTION__, output->name, time);
 	output->dirty = false;
 	render_animated_frame(output, output->config->image->anim);
 	output->last_frame_time = time;
@@ -418,6 +451,17 @@ static void output_mode(void *data, struct wl_output *output, uint32_t flags,
 	// Who cares
 }
 
+void preferred_scale( void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1, uint32_t scale ) {
+	struct swaybg_output *output = (struct swaybg_output*)data;
+	output->scale_hundredtwentieths = scale;
+	output->scale = 1;
+	swaybg_log(LOG_INFO, "Output %s prefers scale %d", output->name, scale);
+}
+
+static const struct wp_fractional_scale_v1_listener fractional_scale_listener = {
+	.preferred_scale = preferred_scale
+};
+
 static void create_layer_surface(struct swaybg_output *output) {
 	output->surface = wl_compositor_create_surface(output->state->compositor);
 	assert(output->surface);
@@ -428,6 +472,11 @@ static void create_layer_surface(struct swaybg_output *output) {
 	assert(input_region);
 	wl_surface_set_input_region(output->surface, input_region);
 	wl_region_destroy(input_region);
+
+	output->fractional_scale = wp_fractional_scale_manager_v1_get_fractional_scale(
+			output->state->fractional_scale_manager, output->surface);
+	wp_fractional_scale_v1_add_listener(output->fractional_scale,
+			&fractional_scale_listener, output);
 
 	output->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 			output->state->layer_shell, output->surface, output->wl_output,
@@ -456,6 +505,10 @@ static void output_done(void *data, struct wl_output *wl_output) {
 		swaybg_log(LOG_DEBUG, "Found config %s for output %s (%s)",
 				output->config->output, output->name, output->identifier);
 		create_layer_surface(output);
+	}
+	if (!output->viewport) {
+		output->viewport = wp_viewporter_get_viewport(
+				output->state->viewporter, output->surface);
 	}
 }
 
@@ -548,6 +601,10 @@ static void handle_global(void *data, struct wl_registry *registry,
 			wp_single_pixel_buffer_manager_v1_interface.name) == 0) {
 		state->single_pixel_buffer_manager = wl_registry_bind(registry, name,
 			&wp_single_pixel_buffer_manager_v1_interface, 1);
+	} else if (strcmp(interface,
+			wp_fractional_scale_manager_v1_interface.name) == 0) {
+		state->fractional_scale_manager = wl_registry_bind(registry, name,
+				&wp_fractional_scale_manager_v1_interface, 1);
 	}
 }
 
@@ -700,7 +757,7 @@ static void parse_command_line(int argc, char **argv,
 }
 
 int main(int argc, char **argv) {
-	swaybg_log_init(LOG_INFO);
+	swaybg_log_init(LOG_DEBUG);
 
 	struct swaybg_state state = {0};
 	wl_list_init(&state.configs);
@@ -765,7 +822,7 @@ int main(int argc, char **argv) {
 				zwlr_layer_surface_v1_ack_configure(
 						output->layer_surface,
 						output->configure_serial);
-				swaybg_log(LOG_DEBUG, "Acking");
+				swaybg_log(LOG_DEBUG, "Acking %s", output->name);
 			}
 
 			int buffer_width = output->width * output->scale,
