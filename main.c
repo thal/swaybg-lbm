@@ -15,6 +15,7 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "single-pixel-buffer-v1-client-protocol.h"
+#include "fractional-scale-v1-client-protocol.h"
 
 /*
  * If `color` is a hexadecimal string of the form 'rrggbb' or '#rrggbb',
@@ -48,6 +49,7 @@ struct swaybg_state {
 	struct zwlr_layer_shell_v1 *layer_shell;
 	struct wp_viewporter *viewporter;
 	struct wp_single_pixel_buffer_manager_v1 *single_pixel_buffer_manager;
+	struct wp_fractional_scale_manager_v1 *fractional_scale_manager;
 	struct wl_list configs;  // struct swaybg_output_config::link
 	struct wl_list outputs;  // struct swaybg_output::link
 	struct wl_list images;   // struct swaybg_image::link
@@ -83,17 +85,29 @@ struct swaybg_output {
 
 	uint32_t width, height;
 	int32_t scale;
+	uint32_t scale_120ths;
 
 	uint32_t configure_serial;
 	bool dirty, needs_ack;
 	int32_t committed_width, committed_height, committed_scale;
+	uint32_t committed_fractional_scale;
+	struct wp_fractional_scale_v1 *fractional_scale;
 
 	struct wl_list link;
 };
 
 static void render_frame(struct swaybg_output *output, cairo_surface_t *surface) {
-	int buffer_width = output->width * output->scale,
-		buffer_height = output->height * output->scale;
+	int buffer_width = output->width, buffer_height = output->height;
+	if (output->scale_120ths) {
+		buffer_width = (buffer_width * output->scale_120ths) / 120;
+		buffer_height = (buffer_height * output->scale_120ths) / 120;
+		// Ensure buffer size is divisible by scale
+		while (buffer_width % output->scale) buffer_width++;
+		while (buffer_height % output->scale) buffer_height++;
+	} else {
+		buffer_width *= output->scale;
+		buffer_height *= output->scale;
+	}
 
 	// If the last committed buffer has the same size as this one would, do
 	// not render a new buffer, because it will be identical to the old one
@@ -104,6 +118,14 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 			wl_surface_commit(output->surface);
 
 			output->committed_scale = output->scale;
+
+		} else if (output->committed_fractional_scale != output->scale_120ths) {
+			struct wp_viewport *viewport = wp_viewporter_get_viewport(
+					output->state->viewporter, output->surface);
+			wp_viewport_set_destination(viewport, output->width, output->height);
+			wl_surface_commit(output->surface);
+			wp_viewport_destroy(viewport);
+			output->committed_fractional_scale = output->scale_120ths;
 		}
 		return;
 	}
@@ -165,14 +187,21 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 	wl_surface_set_buffer_scale(output->surface, output->scale);
 	wl_surface_attach(output->surface, buffer.buffer, 0, 0);
 	wl_surface_damage_buffer(output->surface, 0, 0, INT32_MAX, INT32_MAX);
+
+	struct wp_viewport *viewport = wp_viewporter_get_viewport(
+		output->state->viewporter, output->surface);
+	wp_viewport_set_destination(viewport, output->width, output->height);
+
 	wl_surface_commit(output->surface);
 
 	output->committed_width = buffer_width;
 	output->committed_height = buffer_height;
 	output->committed_scale = output->scale;
+	output->committed_fractional_scale = output->scale_120ths;
 
 	// we will not reuse the buffer, so destroy it immediately
 	destroy_buffer(&buffer);
+	wp_viewport_destroy(viewport);
 }
 
 static void destroy_swaybg_image(struct swaybg_image *image) {
@@ -202,6 +231,9 @@ static void destroy_swaybg_output(struct swaybg_output *output) {
 	}
 	if (output->surface != NULL) {
 		wl_surface_destroy(output->surface);
+	}
+	if (output->fractional_scale != NULL) {
+		wp_fractional_scale_v1_destroy(output->fractional_scale);
 	}
 	wl_output_destroy(output->wl_output);
 	free(output->name);
@@ -233,6 +265,16 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
 	.closed = layer_surface_closed,
 };
 
+static void preferred_scale(void *data,
+		struct wp_fractional_scale_v1 *wp_fractional_scale_v1, uint32_t scale ) {
+	struct swaybg_output *output = data;
+	output->scale_120ths = scale;
+}
+
+static const struct wp_fractional_scale_v1_listener fractional_scale_listener = {
+	.preferred_scale = preferred_scale
+};
+
 static void output_geometry(void *data, struct wl_output *output, int32_t x,
 		int32_t y, int32_t width_mm, int32_t height_mm, int32_t subpixel,
 		const char *make, const char *model, int32_t transform) {
@@ -254,6 +296,11 @@ static void create_layer_surface(struct swaybg_output *output) {
 	assert(input_region);
 	wl_surface_set_input_region(output->surface, input_region);
 	wl_region_destroy(input_region);
+
+	output->fractional_scale = wp_fractional_scale_manager_v1_get_fractional_scale(
+			output->state->fractional_scale_manager, output->surface);
+	wp_fractional_scale_v1_add_listener(output->fractional_scale,
+			&fractional_scale_listener, output);
 
 	output->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
 			output->state->layer_shell, output->surface, output->wl_output,
@@ -374,6 +421,10 @@ static void handle_global(void *data, struct wl_registry *registry,
 			wp_single_pixel_buffer_manager_v1_interface.name) == 0) {
 		state->single_pixel_buffer_manager = wl_registry_bind(registry, name,
 			&wp_single_pixel_buffer_manager_v1_interface, 1);
+	} else if (strcmp(interface,
+			wp_fractional_scale_manager_v1_interface.name) == 0) {
+		state->fractional_scale_manager = wl_registry_bind(registry, name,
+			&wp_fractional_scale_manager_v1_interface, 1);
 	}
 }
 
