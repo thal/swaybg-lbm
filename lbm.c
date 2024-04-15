@@ -276,7 +276,6 @@ void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
                     continue;
                 }
 
-                // TODO: profile and see if there is any point unrolling this
                 dst_buf[dst_idx] = newcolor;
                 if (scale < 2) continue;
                 dst_buf[dst_idx + 1] = newcolor;
@@ -284,6 +283,14 @@ void render_delta(void *buffer, struct lbm_image *image, unsigned int dst_width,
                 dst_buf[dst_idx + 2] = newcolor;
                 if (scale < 4) continue;
                 dst_buf[dst_idx + 3] = newcolor;
+                if (scale < 5) continue;
+                dst_buf[dst_idx + 4] = newcolor;
+                if (scale < 6) continue;
+                dst_buf[dst_idx + 5] = newcolor;
+                if (scale < 7) continue;
+                dst_buf[dst_idx + 6] = newcolor;
+                if (scale < 8) continue;
+                dst_buf[dst_idx + 7] = newcolor;
             }
         }
         damage->max_x = MAX(damage->max_x, range_pixels->bbox.max_x);
