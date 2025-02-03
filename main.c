@@ -86,7 +86,8 @@ struct swaybg_output {
 	uint32_t configure_serial;
 	bool dirty, needs_ack;
 	int32_t committed_width, committed_height, committed_scale;
-	uint32_t last_frame_time;
+	uint32_t last_requested_frame_time;
+	uint32_t last_committed_frame_time;
 	uint64_t frame_count;
 
 	struct pool_buffer buffer;
@@ -193,7 +194,7 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 		buffer_height *= output->scale;
 	}
 
-	swaybg_log(LOG_DEBUG, "%s last committed size %ix%i, this buffer size %ix%i", output->name,
+	swaybg_log(LOG_DEBUG, "%s %s last committed size %ix%i, this buffer size %ix%i", __FUNCTION__, output->name,
 			output->committed_width, output->committed_height, buffer_width, buffer_height);
 
 	// If the last committed buffer has the same size as this one would, do
@@ -286,6 +287,7 @@ static void render_frame(struct swaybg_output *output, cairo_surface_t *surface)
 	wp_viewport_set_destination(output->viewport, output->width, output->height);
 
 	wl_surface_commit(output->surface);
+	output->last_committed_frame_time = output->last_requested_frame_time;
 
 	output->committed_width = buffer_width;
 	output->committed_height = buffer_height;
@@ -309,13 +311,11 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 	bool is_driver = (output == get_driver_for_image(output->state, image));
 
 	// Only one output drives the animation
-	if( is_driver ) {
+	if( is_driver && output->last_committed_frame_time != output->last_requested_frame_time) {
 		do_render = cycle_palette(image);
 	}
 
-	do_render = image->frame_count > output->frame_count;
-
-	if(do_render) {
+	if(do_render || image->frame_count > output->frame_count) {
 		bool buffer_size_changed = false; // TODO: check if size has changed
 		if( buffer_size_changed || !output->buffer.available ) {
 			swaybg_log(LOG_DEBUG, "%s No buffer available. Skipping frame", __FUNCTION__);
@@ -364,22 +364,23 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 
 	struct wl_callback *cb = wl_surface_frame(output->surface);
 	wl_callback_add_listener(cb, &wl_surface_frame_listener, output);
-//	swaybg_log(LOG_DEBUG, "Added listener for %d", output->wl_name);
 
 	wl_surface_commit(output->surface);
+	output->last_committed_frame_time = output->last_requested_frame_time;
 }
 
-// TODO: sway sends several of these per frame. May need to check the timestamp to throttle rendering
-// Looks like it sends a number of callbacks equal to the number of displays. Is this a bug in sway?
 static void wl_surface_frame_done(void *data, struct wl_callback *cb, uint32_t time) {
 	wl_callback_destroy(cb);
 
 	struct swaybg_output *output = data;
-//	swaybg_log(LOG_DEBUG, "%s %s %d", __FUNCTION__, output->name, time);
 	output->dirty = false;
 	// TODO this should also be called from the configure callback. Otherwise there is a single frame at the wrong scale
+
+	output->last_requested_frame_time = time;
+	if (output->last_requested_frame_time == output->last_committed_frame_time) {
+		swaybg_log(LOG_DEBUG, "Duplicate frame detected! %s %s requested:%d last committed:%d", __FUNCTION__, output->name, output->last_requested_frame_time, output->last_committed_frame_time);
+	}
 	render_animated_frame(output, output->config->image->anim);
-	output->last_frame_time = time;
 }
 
 static const struct wl_callback_listener wl_surface_frame_listener = {
@@ -537,10 +538,12 @@ static void output_done(void *data, struct wl_output *wl_output) {
 static void output_scale(void *data, struct wl_output *wl_output,
 		int32_t scale) {
 	struct swaybg_output *output = data;
-	output->scale = scale;
-	if (output->state->run_display && output->width > 0 && output->height > 0) {
+	// if (output->state->run_display && output->width > 0 && output->height > 0) { // ???
+	if (output->scale != scale && output->width > 0 && output->height > 0) {
+		swaybg_log(LOG_DEBUG, "Dirtying output %s because of output scale: %d, (was %d)", output->name, scale, output->scale);
 		output->dirty = true;
 	}
+	output->scale = scale;
 }
 
 static void find_config(struct swaybg_output *output, const char *name) {
@@ -889,6 +892,7 @@ int main(int argc, char **argv) {
 						image->anim->userdata = output;
 					}
 					output->dirty = false;
+					swaybg_log(LOG_DEBUG, "%d going to render a whole new frame for %s", __LINE__, output->name);
 					render_frame(output, surface);
 				}
 			}
@@ -900,6 +904,7 @@ int main(int argc, char **argv) {
 		wl_list_for_each(output, &state.outputs, link) {
 			if (output->dirty) {
 				output->dirty = false;
+				swaybg_log(LOG_DEBUG, "%d going to render a whole new frame for %s", __LINE__, output->name);
 				render_frame(output, NULL);
 			}
 		}
