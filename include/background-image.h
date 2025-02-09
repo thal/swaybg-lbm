@@ -18,6 +18,8 @@ struct swaybg_image {
 	const char *path;
 	bool load_required;
 	struct lbm_image *anim;
+	uint32_t last_cycle_time;
+	uint32_t last_update_time;
 };
 
 enum background_mode parse_background_mode(const char *mode);

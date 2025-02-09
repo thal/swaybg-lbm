@@ -88,7 +88,6 @@ struct swaybg_output {
 	int32_t committed_width, committed_height, committed_scale;
 	uint32_t last_requested_frame_time;
 	uint32_t last_committed_frame_time;
-	uint64_t frame_count;
 
 	struct pool_buffer buffer;
 	void *native_buffer;
@@ -305,17 +304,37 @@ struct swaybg_output *get_driver_for_image( const struct swaybg_state *state, co
 	return NULL;
 }
 
-static void render_animated_frame(struct swaybg_output* output, struct lbm_image *image)
+static void render_animated_frame(struct swaybg_output* output, struct swaybg_image *image)
 {
-	bool do_render = false;
-	bool is_driver = (output == get_driver_for_image(output->state, image));
+	swaybg_log(LOG_DEBUG, "%s  \t now:%d\t last cycle time:%d\t last image change time:%d",
+			output->name, output->last_requested_frame_time, image->last_cycle_time, image->last_update_time);
+	struct lbm_image* anim = image->anim;
 
-	// Only one output drives the animation
-	if( is_driver && output->last_committed_frame_time != output->last_requested_frame_time) {
-		do_render = cycle_palette(image);
+	// Advance the animation if the last cycle was more than 1s/60 ago (per ILBM spec)
+	// TODO: Dont use a hardcoded constant here for timing
+	const uint32_t this_frame_time = output->last_requested_frame_time;
+	bool do_cycle = image->last_cycle_time + 8 < this_frame_time;
+	if (do_cycle) {
+		if (cycle_palette(anim) ) {
+			image->last_update_time = this_frame_time;
+		}
+		image->last_cycle_time = this_frame_time;
+		swaybg_log(LOG_DEBUG, "%s", "FRAME");
 	}
 
-	if(do_render || image->frame_count > output->frame_count) {
+	// Render the image to our buffer if it is less than one frame old
+	// TODO: This should use the output's frame period instead of assuming 60Hz
+	bool do_render = (image->last_update_time + 16 > this_frame_time);
+
+	// Skip rendering if this is a duplicate frame callback
+	do_render = do_render  && output->last_committed_frame_time < output->last_requested_frame_time;
+
+	swaybg_log(LOG_DEBUG, "\t\tCycle? %s\t Render? %s",
+			do_cycle ? "YES" : "NO ",
+			do_render ? "YES" : "NO ");
+
+
+	if (do_render) {
 		bool buffer_size_changed = false; // TODO: check if size has changed
 		if( buffer_size_changed || !output->buffer.available ) {
 			swaybg_log(LOG_DEBUG, "%s No buffer available. Skipping frame", __FUNCTION__);
@@ -348,7 +367,7 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 			buffer_height *= output->scale;
 		}
 
-		render_delta(output->buffer.data, image, buffer_width, buffer_height, output->lbm_origin_x, output->lbm_origin_y, output->lbm_scale, &damage, is_driver);
+		render_delta(output->buffer.data, anim, buffer_width, buffer_height, output->lbm_origin_x, output->lbm_origin_y, output->lbm_scale, &damage, false);
 		wl_surface_set_buffer_scale(output->surface, buffer_scale);
 		wl_surface_attach(output->surface, output->buffer.buffer, 0, 0);
 
@@ -358,7 +377,6 @@ static void render_animated_frame(struct swaybg_output* output, struct lbm_image
 				damage.max_x - damage.min_x,
 				damage.max_y - damage.min_y);
 		output->buffer.available = false;
-		output->frame_count = image->frame_count;
 		wp_viewport_set_destination( output->viewport, output->width, output->height);
 	}
 
@@ -380,7 +398,7 @@ static void wl_surface_frame_done(void *data, struct wl_callback *cb, uint32_t t
 	if (output->last_requested_frame_time == output->last_committed_frame_time) {
 		swaybg_log(LOG_DEBUG, "Duplicate frame detected! %s %s requested:%d last committed:%d", __FUNCTION__, output->name, output->last_requested_frame_time, output->last_committed_frame_time);
 	}
-	render_animated_frame(output, output->config->image->anim);
+	render_animated_frame(output, output->config->image);
 }
 
 static const struct wl_callback_listener wl_surface_frame_listener = {
@@ -478,7 +496,7 @@ static void output_mode(void *data, struct wl_output *output, uint32_t flags,
 void preferred_scale( void *data, struct wp_fractional_scale_v1 *wp_fractional_scale_v1, uint32_t scale ) {
 	struct swaybg_output *output = (struct swaybg_output*)data;
 	output->scale_120ths = scale;
-	swaybg_log(LOG_INFO, "Output %s prefers scale %d", output->name, scale);
+	swaybg_log(LOG_DEBUG, "Output %s prefers scale %d", output->name, scale);
 }
 
 static const struct wp_fractional_scale_v1_listener fractional_scale_listener = {
@@ -782,7 +800,7 @@ static void parse_command_line(int argc, char **argv,
 }
 
 int main(int argc, char **argv) {
-	swaybg_log_init(LOG_DEBUG);
+	swaybg_log_init(LOG_INFO);
 
 	struct swaybg_state state = {0};
 	wl_list_init(&state.configs);
